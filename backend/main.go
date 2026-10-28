@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -68,17 +69,22 @@ type Source struct {
 }
 
 type App struct {
-	db               *sql.DB
-	cipher           cipher.AEAD
-	client           *http.Client
-	refreshMu        sync.Mutex
-	refreshing       map[string]bool
-	selected         string
-	controller       string
-	controllerSecret string
-	baseConfigPath   string
-	edgeConfigPath   string
-	mihomoBin        string
+	db                *sql.DB
+	cipher            cipher.AEAD
+	client            *http.Client
+	refreshMu         sync.Mutex
+	refreshing        map[string]bool
+	selected          string
+	controller        string
+	controllerSecret  string
+	baseConfigPath    string
+	edgeConfigPath    string
+	mihomoBin         string
+	oauthEnabled      bool
+	oauthClientID     string
+	oauthClientSecret string
+	oauthSessionKey   []byte
+	publicURL         string
 }
 
 func main() {
@@ -109,11 +115,25 @@ func main() {
 	}
 	a := &App{
 		db: db, cipher: aead, client: safeClient(), refreshing: map[string]bool{},
-		controller:       strings.TrimRight(os.Getenv("MIHOMO_CONTROLLER_URL"), "/"),
-		controllerSecret: os.Getenv("MIHOMO_CONTROLLER_SECRET"),
-		baseConfigPath:   os.Getenv("CLASH_CLOUD_BASE_CONFIG"),
-		edgeConfigPath:   os.Getenv("CLASH_CLOUD_EDGE_CONFIG"),
-		mihomoBin:        os.Getenv("CLASH_CLOUD_MIHOMO_BIN"),
+		controller:        strings.TrimRight(os.Getenv("MIHOMO_CONTROLLER_URL"), "/"),
+		controllerSecret:  os.Getenv("MIHOMO_CONTROLLER_SECRET"),
+		baseConfigPath:    os.Getenv("CLASH_CLOUD_BASE_CONFIG"),
+		edgeConfigPath:    os.Getenv("CLASH_CLOUD_EDGE_CONFIG"),
+		mihomoBin:         os.Getenv("CLASH_CLOUD_MIHOMO_BIN"),
+		oauthEnabled:      os.Getenv("CLASH_CLOUD_OAUTH_ENABLED") == "1",
+		oauthClientID:     os.Getenv("CLASH_CLOUD_MATTERMOST_CLIENT_ID"),
+		oauthClientSecret: os.Getenv("CLASH_CLOUD_MATTERMOST_CLIENT_SECRET"),
+		publicURL:         strings.TrimRight(os.Getenv("CLASH_CLOUD_PUBLIC_URL"), "/"),
+	}
+	if a.oauthEnabled {
+		a.oauthSessionKey, err = decodeSecretKey(os.Getenv("CLASH_CLOUD_OAUTH_SESSION_KEY"))
+		if err != nil || a.oauthClientID == "" || a.oauthClientSecret == "" || a.publicURL == "" {
+			log.Fatal("Mattermost OAuth configuration is incomplete")
+		}
+		u, parseErr := url.Parse(a.publicURL)
+		if parseErr != nil || u.Scheme != "https" || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+			log.Fatal("CLASH_CLOUD_PUBLIC_URL must be an HTTPS origin")
+		}
 	}
 	if err := a.validateEdgeSettings(); err != nil {
 		log.Fatal("edge publishing configuration is incomplete or unsafe")
@@ -124,6 +144,7 @@ func main() {
 	go a.scheduler()
 	addr := env("CLASH_CLOUD_LISTEN", "127.0.0.1:8080")
 	mux := http.NewServeMux()
+	mux.HandleFunc("/auth/", a.oauth)
 	mux.HandleFunc("/api/v1/", a.api)
 	mux.HandleFunc("/s/", a.subscription)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -153,6 +174,16 @@ func encryptionKey(s string) ([]byte, error) {
 		return b, nil
 	}
 	return nil, errors.New("invalid key")
+}
+func decodeSecretKey(s string) ([]byte, error) {
+	if b, err := base64.StdEncoding.DecodeString(s); err == nil && len(b) >= 32 {
+		return b, nil
+	}
+	b, err := hex.DecodeString(s)
+	if err == nil && len(b) >= 32 {
+		return b, nil
+	}
+	return nil, errors.New("invalid secret key")
 }
 func migrate(db *sql.DB) error {
 	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS subscriptions(
@@ -296,6 +327,12 @@ func (a *App) api(w http.ResponseWriter, r *http.Request) { // Routes are protec
 		jsonResponse(w, 200, map[string]string{"status": "ok", "version": env("CLASH_CLOUD_VERSION", "dev")})
 		return
 	}
+	if a.oauthEnabled {
+		if _, ok := a.sessionUser(r); !ok {
+			apiError(w, http.StatusUnauthorized, "unauthorized", "Sign in required")
+			return
+		}
+	}
 	if p == "/subscriptions" {
 		switch r.Method {
 		case http.MethodGet:
@@ -332,6 +369,195 @@ func (a *App) api(w http.ResponseWriter, r *http.Request) { // Routes are protec
 		return
 	}
 	apiError(w, 404, "not_found", "Not found")
+}
+
+const mattermostBaseURL = "https://mm.chenkeyan.com"
+
+type oauthSession struct {
+	UserID   string `json:"sub"`
+	Username string `json:"name"`
+	Expires  int64  `json:"exp"`
+}
+
+func (a *App) oauth(w http.ResponseWriter, r *http.Request) {
+	if !a.oauthEnabled {
+		if r.URL.Path == "/auth/me" && r.Method == http.MethodGet {
+			jsonResponse(w, http.StatusOK, map[string]string{"id": "local", "username": "local"})
+			return
+		}
+		http.Error(w, "Authentication is not configured", http.StatusServiceUnavailable)
+		return
+	}
+	switch r.URL.Path {
+	case "/auth/login":
+		if r.Method != http.MethodGet {
+			method(w)
+			return
+		}
+		a.startOAuth(w, r)
+	case "/auth/callback":
+		if r.Method != http.MethodGet {
+			method(w)
+			return
+		}
+		a.finishOAuth(w, r)
+	case "/auth/me":
+		if r.Method != http.MethodGet {
+			method(w)
+			return
+		}
+		user, ok := a.sessionUser(r)
+		if !ok {
+			apiError(w, http.StatusUnauthorized, "unauthorized", "Sign in required")
+			return
+		}
+		jsonResponse(w, http.StatusOK, map[string]string{"id": user.UserID, "username": user.Username})
+	case "/auth/logout":
+		if r.Method != http.MethodPost {
+			method(w)
+			return
+		}
+		http.SetCookie(w, &http.Cookie{Name: "clash_cloud_session", Value: "", Path: "/", Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: -1})
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (a *App) startOAuth(w http.ResponseWriter, r *http.Request) {
+	state := make([]byte, 32)
+	if _, err := rand.Read(state); err != nil {
+		http.Error(w, "Unable to start sign in", http.StatusInternalServerError)
+		return
+	}
+	stateValue := base64.RawURLEncoding.EncodeToString(state)
+	http.SetCookie(w, &http.Cookie{Name: "clash_cloud_oauth_state", Value: stateValue, Path: "/auth/callback", Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: 600})
+	callback := a.publicURL + "/auth/callback"
+	query := url.Values{"client_id": {a.oauthClientID}, "response_type": {"code"}, "redirect_uri": {callback}, "state": {stateValue}}
+	http.Redirect(w, r, mattermostBaseURL+"/oauth/authorize?"+query.Encode(), http.StatusFound)
+}
+
+func (a *App) finishOAuth(w http.ResponseWriter, r *http.Request) {
+	stateCookie, err := r.Cookie("clash_cloud_oauth_state")
+	clearCookie(w, "clash_cloud_oauth_state", "/auth/callback")
+	if err != nil || stateCookie.Value == "" || r.URL.Query().Get("state") == "" || !hmac.Equal([]byte(stateCookie.Value), []byte(r.URL.Query().Get("state"))) {
+		http.Error(w, "Invalid sign in request", http.StatusBadRequest)
+		return
+	}
+	if r.URL.Query().Get("error") != "" {
+		http.Error(w, "Mattermost sign in was not completed", http.StatusUnauthorized)
+		return
+	}
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		http.Error(w, "Missing authorization code", http.StatusBadRequest)
+		return
+	}
+	callback := a.publicURL + "/auth/callback"
+	form := url.Values{"grant_type": {"authorization_code"}, "client_id": {a.oauthClientID}, "client_secret": {a.oauthClientSecret}, "code": {code}, "redirect_uri": {callback}}
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, mattermostBaseURL+"/oauth/access_token", strings.NewReader(form.Encode()))
+	if err != nil {
+		http.Error(w, "Unable to complete sign in", http.StatusBadGateway)
+		return
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	resp, err := a.client.Do(req)
+	if err != nil {
+		http.Error(w, "Unable to complete sign in", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+	var token struct {
+		AccessToken string `json:"access_token"`
+	}
+	if resp.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&token) != nil || token.AccessToken == "" {
+		http.Error(w, "Unable to complete sign in", http.StatusUnauthorized)
+		return
+	}
+	profileReq, err := http.NewRequestWithContext(r.Context(), http.MethodGet, mattermostBaseURL+"/api/v4/users/me", nil)
+	if err != nil {
+		http.Error(w, "Unable to verify Mattermost account", http.StatusBadGateway)
+		return
+	}
+	profileReq.Header.Set("Authorization", "Bearer "+token.AccessToken)
+	profileResp, err := a.client.Do(profileReq)
+	if err != nil {
+		http.Error(w, "Unable to verify Mattermost account", http.StatusBadGateway)
+		return
+	}
+	defer profileResp.Body.Close()
+	var profile struct {
+		ID       string `json:"id"`
+		Username string `json:"username"`
+		Roles    string `json:"roles"`
+	}
+	if profileResp.StatusCode != http.StatusOK || json.NewDecoder(io.LimitReader(profileResp.Body, 64<<10)).Decode(&profile) != nil {
+		http.Error(w, "Unable to verify Mattermost account", http.StatusUnauthorized)
+		return
+	}
+	if profile.ID == "" || profile.Username == "" || !hasRole(profile.Roles, "system_admin") {
+		http.Error(w, "A Mattermost system administrator account is required", http.StatusForbidden)
+		return
+	}
+	if err := a.setSession(w, oauthSession{UserID: profile.ID, Username: profile.Username, Expires: time.Now().Add(12 * time.Hour).Unix()}); err != nil {
+		http.Error(w, "Unable to create session", http.StatusInternalServerError)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func hasRole(roles, role string) bool {
+	for _, item := range strings.Fields(roles) {
+		if item == role {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *App) setSession(w http.ResponseWriter, session oauthSession) error {
+	data, err := json.Marshal(session)
+	if err != nil {
+		return err
+	}
+	payload := base64.RawURLEncoding.EncodeToString(data)
+	mac := hmac.New(sha256.New, a.oauthSessionKey)
+	_, _ = mac.Write([]byte(payload))
+	http.SetCookie(w, &http.Cookie{Name: "clash_cloud_session", Value: payload + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil)), Path: "/", Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode, Expires: time.Unix(session.Expires, 0), MaxAge: 12 * 60 * 60})
+	return nil
+}
+
+func (a *App) sessionUser(r *http.Request) (oauthSession, bool) {
+	cookie, err := r.Cookie("clash_cloud_session")
+	if err != nil {
+		return oauthSession{}, false
+	}
+	parts := strings.Split(cookie.Value, ".")
+	if len(parts) != 2 {
+		return oauthSession{}, false
+	}
+	provided, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return oauthSession{}, false
+	}
+	mac := hmac.New(sha256.New, a.oauthSessionKey)
+	_, _ = mac.Write([]byte(parts[0]))
+	if !hmac.Equal(provided, mac.Sum(nil)) {
+		return oauthSession{}, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return oauthSession{}, false
+	}
+	var session oauthSession
+	if json.Unmarshal(payload, &session) != nil || session.UserID == "" || session.Expires <= time.Now().Unix() {
+		return oauthSession{}, false
+	}
+	return session, true
+}
+
+func clearCookie(w http.ResponseWriter, name, cookiePath string) {
+	http.SetCookie(w, &http.Cookie{Name: name, Value: "", Path: cookiePath, Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: -1})
 }
 func (a *App) listSources(w http.ResponseWriter) {
 	rows, e := a.db.Query(`SELECT id,name,enabled,refresh_interval,node_count,last_attempt_at,last_success_at,status,error_code FROM subscriptions ORDER BY created_at,id`)

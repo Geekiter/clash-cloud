@@ -20,6 +20,7 @@ import SearchRounded from '@mui/icons-material/SearchRounded'
 import VisibilityRounded from '@mui/icons-material/VisibilityRounded'
 import VisibilityOffRounded from '@mui/icons-material/VisibilityOffRounded'
 import WifiTetheringRounded from '@mui/icons-material/WifiTetheringRounded'
+import LogoutRounded from '@mui/icons-material/LogoutRounded'
 
 type SubStatus = 'pending' | 'healthy' | 'degraded' | 'failed' | 'disabled' | string
 type Subscription = { id: string; name: string; enabled: boolean; refreshIntervalSeconds: number; nodeCount: number; lastAttemptAt?: string | null; lastSuccessAt?: string | null; status: SubStatus; errorCode?: string | null }
@@ -63,6 +64,16 @@ export default function App() {
   const [notice, setNotice] = useState<Notice | null>(null)
   const [visibleUrl, setVisibleUrl] = useState(false)
   const [testBusy, setTestBusy] = useState<string | null>(null)
+  const [authReady, setAuthReady] = useState(false)
+  const [authError, setAuthError] = useState('')
+
+  useEffect(() => {
+    fetch('/auth/me').then(async response => {
+      if (response.status === 401) { window.location.replace('/auth/login'); return }
+      if (!response.ok) throw new Error('登录状态无法验证')
+      setAuthReady(true)
+    }).catch(error => setAuthError(error instanceof Error ? error.message : '登录状态无法验证'))
+  }, [])
 
   const load = useCallback(async (target: Page = page) => {
     setLoading(true)
@@ -87,7 +98,12 @@ export default function App() {
     } finally { setLoading(false) }
   }, [page, nodeQuery, nodeFilter])
 
-  useEffect(() => { void load(page) }, [page, load])
+  useEffect(() => { if (authReady) void load(page) }, [page, load, authReady])
+
+  const logout = async () => {
+    await fetch('/auth/logout', { method: 'POST' })
+    window.location.replace('/auth/login')
+  }
 
   const counters = useMemo(() => ({ total: subs.length, enabled: subs.filter(s => s.enabled).length, nodes: subs.reduce((n, s) => n + (s.nodeCount || 0), 0), issues: subs.filter(s => s.status === 'failed' || s.status === 'degraded').length }), [subs])
 
@@ -129,12 +145,15 @@ export default function App() {
     {[['subscriptions', '订阅', <AutorenewRounded key="s"/>], ['nodes', '节点', <HubOutlined key="n"/>], ['output', '统一出口', <LinkRounded key="o"/>]] .map(([key, title, icon]) => <Button key={key as string} startIcon={icon} onClick={() => setPage(key as Page)} className={`nav-item ${page === key ? 'selected' : ''}`} fullWidth>{title}</Button>)}
   </Stack>
 
+  if (authError) return <Box sx={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}><Stack alignItems="center" spacing={2}><Typography>{authError}</Typography><Button variant="contained" onClick={() => window.location.replace('/auth/login')}>重新登录</Button></Stack></Box>
+  if (!authReady) return <Box sx={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}><CircularProgress size={24}/></Box>
+
   return <Box className="app-shell">
     {!mobile && <Drawer variant="permanent" className="side-drawer" PaperProps={{ className: 'drawer-paper' }}><Box className="brand"><span className="brand-mark"><WifiTetheringRounded/></span><Typography variant="subtitle1" fontWeight={750}>CLASH CLOUD</Typography></Box><Divider sx={{ borderColor: 'rgba(255,255,255,.12)' }}/>{nav}<Box className="drawer-bottom"><span className="live-dot"/> Mihomo 管理</Box></Drawer>}
     <Box component="main" className="main-area">
       {mobile && <AppBar position="sticky" elevation={0} className="mobile-bar"><Toolbar><span className="brand-mark"><WifiTetheringRounded/></span><Typography fontWeight={750}>CLASH CLOUD</Typography></Toolbar>{nav}</AppBar>}
       <Box className="content">
-        <Box className="page-heading"><Box><Typography variant="h4">{{ subscriptions: '订阅', nodes: '节点', output: '统一出口' }[page]}</Typography></Box>{page === 'subscriptions' && <Button variant="contained" startIcon={<AddRounded/>} onClick={() => { setActiveSub(null); setDialog('create') }}>添加订阅</Button>}{page === 'nodes' && <Tooltip title="刷新"><IconButton onClick={() => void load('nodes')}><AutorenewRounded/></IconButton></Tooltip>}</Box>
+        <Box className="page-heading"><Box><Typography variant="h4">{{ subscriptions: '订阅', nodes: '节点', output: '统一出口' }[page]}</Typography></Box><Stack direction="row" spacing={1} alignItems="center">{page === 'subscriptions' && <Button variant="contained" startIcon={<AddRounded/>} onClick={() => { setActiveSub(null); setDialog('create') }}>添加订阅</Button>}{page === 'nodes' && <Tooltip title="刷新"><IconButton onClick={() => void load('nodes')}><AutorenewRounded/></IconButton></Tooltip>}<Tooltip title="退出登录"><IconButton onClick={() => void logout()} aria-label="退出登录"><LogoutRounded/></IconButton></Tooltip></Stack></Box>
 
         {page === 'subscriptions' && <>
           <Box className="stats-row">

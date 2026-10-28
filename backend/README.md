@@ -17,9 +17,9 @@ CLASH_CLOUD_PUBLIC_URL=https://example.invalid \
 ./clash-cloud
 ```
 
-Generate a key with `openssl rand -base64 32` and store it in a root-readable systemd environment file. `CLASH_CLOUD_ENCRYPTION_KEY` accepts base64 or hex encoding of exactly 32 bytes. Back up the database and key together. Losing the key makes stored subscription URLs unreadable.
+Generate a key with `openssl rand -base64 32` and store it in a root-readable systemd environment file. `CLASH_CLOUD_ENCRYPTION_KEY` accepts base64 or hex encoding of exactly 32 bytes. Back up the database and key together. Losing the key makes stored subscription URLs unreadable. Production deployments set `CLASH_CLOUD_OAUTH_ENABLED=1` through the required `mattermost-oauth.env` systemd drop-in; a missing credentials file prevents the service from starting.
 
-The management API has no built-in user authentication. Bind to loopback and put it behind the authenticated ingress. Do not expose the management API directly to the Internet. The unified `/s/{token}` endpoint is independent and accepts only its bearer token. Do not log request headers or subscription bodies.
+The management UI and API use Mattermost OAuth when `CLASH_CLOUD_OAUTH_ENABLED=1`. OAuth uses the authorization-code flow and limits access to Mattermost `system_admin` accounts. The backend stores a signed 12-hour HttpOnly session cookie and does not persist Mattermost access tokens. Keep the client secret and session signing key in a root-only systemd environment file. The public `/s/{token}` endpoint is independent and accepts only its bearer token. Do not log request headers, OAuth callback query strings, or subscription bodies.
 
 ## Configuration
 
@@ -27,6 +27,9 @@ The management API has no built-in user authentication. Bind to loopback and put
 - `CLASH_CLOUD_LISTEN`: listen address (default `127.0.0.1:8080`).
 - `CLASH_CLOUD_ENCRYPTION_KEY`: required 32-byte AES-GCM key as base64 or hex.
 - `CLASH_CLOUD_PUBLIC_URL`: optional public base URL used in output metadata. If unset, API returns a relative `/s/{token}` URL.
+- `CLASH_CLOUD_OAUTH_ENABLED`: set to `1` to require a signed-in Mattermost system administrator and enable `/auth/login`, `/auth/callback`, `/auth/me`, and `/auth/logout`.
+- `CLASH_CLOUD_MATTERMOST_CLIENT_ID`, `CLASH_CLOUD_MATTERMOST_CLIENT_SECRET`: confidential OAuth application credentials registered in Mattermost. Keep the secret out of Git.
+- `CLASH_CLOUD_OAUTH_SESSION_KEY`: independent base64 or hex key with at least 32 bytes of entropy used to sign browser sessions.
 - `CLASH_CLOUD_VERSION`: optional health response version.
 - `MIHOMO_CONTROLLER_URL`, `MIHOMO_CONTROLLER_SECRET`: controller integration for delay testing and proxy selection. When edge publishing is enabled, both are required and the URL must be an explicit loopback HTTP address and port.
 - `CLASH_CLOUD_BASE_CONFIG`: absolute path to an operator-maintained Mihomo YAML file. Its ports, DNS, rules, listeners, and other settings are preserved by the edge renderer.
