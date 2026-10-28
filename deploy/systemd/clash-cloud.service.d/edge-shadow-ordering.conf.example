@@ -1,0 +1,3 @@
+[Unit]
+Wants=clash-cloud-edge-shadow.service
+After=clash-cloud-edge-shadow.service

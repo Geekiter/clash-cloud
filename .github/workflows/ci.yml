@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backend-build:
+    name: Backend build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Go packages when the module exists
+        id: go
+        shell: bash
+        run: |
+          if [[ ! -f backend/go.mod ]]; then
+            echo "backend/go.mod not present; skipping backend build"
+            exit 0
+          fi
+          go_version="$(sed -n 's/^go //p' backend/go.mod | head -n1)"
+          if [[ -z "$go_version" ]]; then
+            echo "backend/go.mod has no Go version directive"
+            exit 1
+          fi
+          echo "go-version=$go_version" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v5
+        if: ${{ steps.go.outputs.go-version != '' }}
+        with:
+          go-version: ${{ steps.go.outputs.go-version }}
+          cache: true
+          cache-dependency-path: backend/go.mod
+      - name: Compile
+        if: ${{ steps.go.outputs.go-version != '' }}
+        working-directory: backend
+        run: go build -trimpath ./...
+
+  frontend-build:
+    name: Frontend lint and build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for deterministic frontend inputs
+        id: frontend
+        shell: bash
+        run: |
+          if [[ -f web/package.json && -f web/package-lock.json ]]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Frontend package.json or package-lock.json not present; skipping frontend build"
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/setup-node@v4
+        if: ${{ steps.frontend.outputs.ready == 'true' }}
+        with:
+          node-version: 22.14.0
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install locked dependencies
+        if: ${{ steps.frontend.outputs.ready == 'true' }}
+        working-directory: web
+        run: npm ci
+      - name: Lint
+        if: ${{ steps.frontend.outputs.ready == 'true' }}
+        working-directory: web
+        run: npm run lint --if-present
+      - name: Build
+        if: ${{ steps.frontend.outputs.ready == 'true' }}
+        working-directory: web
+        run: npm run build

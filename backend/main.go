@@ -1,0 +1,1477 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"os/exec"
+	"path"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	_ "github.com/mattn/go-sqlite3"
+	"gopkg.in/yaml.v3"
+)
+
+const (
+	maxFetchBytes = 5 << 20
+	maxNodes      = 2000
+	maxNameLength = 160
+	defaultEvery  = 3600
+)
+
+type Node struct {
+	ID         string                 `json:"id"`
+	Name       string                 `json:"name"`
+	Type       string                 `json:"type"`
+	SourceID   string                 `json:"sourceId"`
+	SourceName string                 `json:"sourceName"`
+	LatencyMs  *int                   `json:"latencyMs,omitempty"`
+	Available  *bool                  `json:"available,omitempty"`
+	Selected   bool                   `json:"selected,omitempty"`
+	Raw        map[string]interface{} `json:"-"`
+}
+
+type snapshotNode struct {
+	Node
+	Proxy map[string]interface{} `json:"proxy"`
+}
+
+type Source struct {
+	ID                     string     `json:"id"`
+	Name                   string     `json:"name"`
+	Enabled                bool       `json:"enabled"`
+	RefreshIntervalSeconds int        `json:"refreshIntervalSeconds"`
+	NodeCount              int        `json:"nodeCount"`
+	LastAttemptAt          *time.Time `json:"lastAttemptAt"`
+	LastSuccessAt          *time.Time `json:"lastSuccessAt"`
+	Status                 string     `json:"status"`
+	ErrorCode              string     `json:"errorCode,omitempty"`
+}
+
+type App struct {
+	db               *sql.DB
+	cipher           cipher.AEAD
+	client           *http.Client
+	refreshMu        sync.Mutex
+	refreshing       map[string]bool
+	selected         string
+	controller       string
+	controllerSecret string
+	baseConfigPath   string
+	edgeConfigPath   string
+	mihomoBin        string
+}
+
+func main() {
+	key, err := encryptionKey(os.Getenv("CLASH_CLOUD_ENCRYPTION_KEY"))
+	if err != nil {
+		log.Fatal("CLASH_CLOUD_ENCRYPTION_KEY must be a base64 or hex encoded 32-byte key")
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		log.Fatal("cannot initialize encryption")
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		log.Fatal("cannot initialize encryption")
+	}
+	dbPath := env("CLASH_CLOUD_DB", "./clash-cloud.db")
+	db, err := sql.Open("sqlite3", dbPath+"?_busy_timeout=5000&_journal_mode=WAL&_foreign_keys=on")
+	if err != nil {
+		log.Fatal("cannot open database")
+	}
+	defer db.Close()
+	if err = migrate(db); err != nil {
+		log.Fatal("database migration failed")
+	}
+	outURL := strings.TrimRight(os.Getenv("CLASH_CLOUD_PUBLIC_URL"), "/")
+	if outURL == "" {
+		outURL = ""
+	}
+	a := &App{
+		db: db, cipher: aead, client: safeClient(), refreshing: map[string]bool{},
+		controller:       strings.TrimRight(os.Getenv("MIHOMO_CONTROLLER_URL"), "/"),
+		controllerSecret: os.Getenv("MIHOMO_CONTROLLER_SECRET"),
+		baseConfigPath:   os.Getenv("CLASH_CLOUD_BASE_CONFIG"),
+		edgeConfigPath:   os.Getenv("CLASH_CLOUD_EDGE_CONFIG"),
+		mihomoBin:        os.Getenv("CLASH_CLOUD_MIHOMO_BIN"),
+	}
+	if err := a.validateEdgeSettings(); err != nil {
+		log.Fatal("edge publishing configuration is incomplete or unsafe")
+	}
+	if err := a.ensureOutputToken(outURL); err != nil {
+		log.Fatal("cannot initialize output token")
+	}
+	go a.scheduler()
+	addr := env("CLASH_CLOUD_LISTEN", "127.0.0.1:8080")
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/", a.api)
+	mux.HandleFunc("/s/", a.subscription)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			jsonResponse(w, 200, map[string]string{"service": "clash-cloud"})
+			return
+		}
+		http.NotFound(w, r)
+	})
+	server := &http.Server{Addr: addr, Handler: accessLog(mux), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second}
+	log.Printf("clash-cloud listening on %s", addr)
+	log.Fatal(server.ListenAndServe())
+}
+
+func env(k, d string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return d
+}
+func encryptionKey(s string) ([]byte, error) {
+	if b, e := base64.StdEncoding.DecodeString(s); e == nil && len(b) == 32 {
+		return b, nil
+	}
+	b, e := hex.DecodeString(s)
+	if e == nil && len(b) == 32 {
+		return b, nil
+	}
+	return nil, errors.New("invalid key")
+}
+func migrate(db *sql.DB) error {
+	_, err := db.Exec(`CREATE TABLE IF NOT EXISTS subscriptions(
+	id TEXT PRIMARY KEY,name TEXT NOT NULL,encrypted_url BLOB NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,
+	refresh_interval INTEGER NOT NULL,created_at TEXT NOT NULL,last_attempt_at TEXT,last_success_at TEXT,
+	status TEXT NOT NULL DEFAULT 'pending',error_code TEXT NOT NULL DEFAULT '',node_count INTEGER NOT NULL DEFAULT 0,
+	next_refresh_at TEXT NOT NULL);
+	CREATE TABLE IF NOT EXISTS snapshots(subscription_id TEXT PRIMARY KEY,nodes_json BLOB NOT NULL,updated_at TEXT NOT NULL,
+	FOREIGN KEY(subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE);
+	CREATE TABLE IF NOT EXISTS output_settings(id INTEGER PRIMARY KEY CHECK(id=1),token_hash TEXT NOT NULL,encrypted_token BLOB NOT NULL,
+	public_url TEXT NOT NULL DEFAULT '',config BLOB NOT NULL DEFAULT '',generated_at TEXT,revision INTEGER NOT NULL DEFAULT 0);
+	CREATE TABLE IF NOT EXISTS proxy_selection(group_name TEXT PRIMARY KEY,node_name TEXT NOT NULL);`)
+	return err
+}
+func safeClient() *http.Client {
+	tr := &http.Transport{Proxy: nil, TLSHandshakeTimeout: 5 * time.Second, ResponseHeaderTimeout: 8 * time.Second, IdleConnTimeout: 30 * time.Second, MaxIdleConns: 10}
+	tr.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, err
+		}
+		ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, errors.New("dns_lookup_failed")
+		}
+		if len(ips) == 0 {
+			return nil, errors.New("dns_lookup_failed")
+		}
+		var last error
+		for _, ip := range ips {
+			if !publicIP(ip.IP) {
+				return nil, errors.New("blocked_address")
+			}
+			c, e := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, network, net.JoinHostPort(ip.IP.String(), port))
+			if e == nil {
+				return c, nil
+			}
+			last = e
+		}
+		return nil, last
+	}
+	return &http.Client{Transport: tr, Timeout: 15 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 4 {
+			return errors.New("too_many_redirects")
+		}
+		if err := validateURL(req.URL); err != nil {
+			return err
+		}
+		return nil
+	}}
+}
+func publicIP(ip net.IP) bool {
+	if ip == nil || ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast() {
+		return false
+	}
+	v4 := ip.To4()
+	if v4 == nil {
+		return true
+	}
+	blocked := []*net.IPNet{}
+	for _, cidr := range []string{"0.0.0.0/8", "100.64.0.0/10", "192.0.0.0/24", "192.0.2.0/24", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4"} {
+		_, n, _ := net.ParseCIDR(cidr)
+		blocked = append(blocked, n)
+	}
+	for _, n := range blocked {
+		if n.Contains(v4) {
+			return false
+		}
+	}
+	return true
+}
+func validateURL(u *url.URL) error {
+	if u == nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+		return errors.New("invalid_url")
+	}
+	if ip := net.ParseIP(u.Hostname()); ip != nil {
+		if !publicIP(ip) {
+			return errors.New("blocked_address")
+		}
+		return nil
+	}
+	ips, err := net.LookupIP(u.Hostname())
+	if err != nil || len(ips) == 0 {
+		return errors.New("dns_lookup_failed")
+	}
+	for _, ip := range ips {
+		if !publicIP(ip) {
+			return errors.New("blocked_address")
+		}
+	}
+	return nil
+}
+func (a *App) encrypt(b []byte) ([]byte, error) {
+	nonce := make([]byte, a.cipher.NonceSize())
+	if _, e := rand.Read(nonce); e != nil {
+		return nil, e
+	}
+	return append(nonce, a.cipher.Seal(nil, nonce, b, nil)...), nil
+}
+func (a *App) decrypt(b []byte) ([]byte, error) {
+	n := a.cipher.NonceSize()
+	if len(b) < n {
+		return nil, errors.New("bad ciphertext")
+	}
+	return a.cipher.Open(nil, b[:n], b[n:], nil)
+}
+func randomToken() (string, error) {
+	b := make([]byte, 32)
+	if _, e := rand.Read(b); e != nil {
+		return "", e
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+func hash(s string) string { h := sha256.Sum256([]byte(s)); return hex.EncodeToString(h[:]) }
+func (a *App) ensureOutputToken(publicURL string) error {
+	var count int
+	err := a.db.QueryRow(`SELECT count(*) FROM output_settings WHERE id=1`).Scan(&count)
+	if err != nil {
+		return err
+	}
+	if count > 0 {
+		if publicURL != "" {
+			_, err = a.db.Exec(`UPDATE output_settings SET public_url=? WHERE id=1`, publicURL)
+		}
+		return err
+	}
+	t, e := randomToken()
+	if e != nil {
+		return e
+	}
+	encrypted, e := a.encrypt([]byte(t))
+	if e != nil {
+		return e
+	}
+	_, e = a.db.Exec(`INSERT INTO output_settings(id,token_hash,encrypted_token,public_url,config,revision) VALUES(1,?,?,?,?,0)`, hash(t), encrypted, publicURL, []byte{})
+	return e
+}
+func (a *App) api(w http.ResponseWriter, r *http.Request) { // Routes are protected by the trusted ingress; bind to loopback by default.
+	p := strings.TrimPrefix(r.URL.Path, "/api/v1")
+	if p == "/health" && r.Method == http.MethodGet {
+		jsonResponse(w, 200, map[string]string{"status": "ok", "version": env("CLASH_CLOUD_VERSION", "dev")})
+		return
+	}
+	if p == "/subscriptions" {
+		switch r.Method {
+		case http.MethodGet:
+			a.listSources(w)
+		case http.MethodPost:
+			a.createSource(w, r)
+		default:
+			method(w)
+		}
+		return
+	}
+	if p == "/nodes" && r.Method == http.MethodGet {
+		a.listNodes(w, r)
+		return
+	}
+	if p == "/output" && r.Method == http.MethodGet {
+		a.outputInfo(w)
+		return
+	}
+	if p == "/output/rotate-token" && r.Method == http.MethodPost {
+		a.rotateToken(w)
+		return
+	}
+	if strings.HasPrefix(p, "/subscriptions/") {
+		a.sourceRoute(w, r, strings.TrimPrefix(p, "/subscriptions/"))
+		return
+	}
+	if strings.HasPrefix(p, "/nodes/") && strings.HasSuffix(p, "/delay-test") && r.Method == http.MethodPost {
+		a.delayTest(w, r)
+		return
+	}
+	if strings.HasPrefix(p, "/proxy-groups/") && strings.HasSuffix(p, "/selection") && r.Method == http.MethodPost {
+		a.selectProxy(w, r)
+		return
+	}
+	apiError(w, 404, "not_found", "Not found")
+}
+func (a *App) listSources(w http.ResponseWriter) {
+	rows, e := a.db.Query(`SELECT id,name,enabled,refresh_interval,node_count,last_attempt_at,last_success_at,status,error_code FROM subscriptions ORDER BY created_at,id`)
+	if e != nil {
+		internal(w)
+		return
+	}
+	defer rows.Close()
+	items := []Source{}
+	for rows.Next() {
+		s := Source{}
+		var en int
+		var at, ok sql.NullString
+		if rows.Scan(&s.ID, &s.Name, &en, &s.RefreshIntervalSeconds, &s.NodeCount, &at, &ok, &s.Status, &s.ErrorCode) != nil {
+			internal(w)
+			return
+		}
+		s.Enabled = en != 0
+		s.LastAttemptAt = parseTime(at)
+		s.LastSuccessAt = parseTime(ok)
+		items = append(items, s)
+	}
+	jsonResponse(w, 200, map[string]interface{}{"items": items, "total": len(items)})
+}
+func parseTime(v sql.NullString) *time.Time {
+	if !v.Valid {
+		return nil
+	}
+	t, e := time.Parse(time.RFC3339Nano, v.String)
+	if e != nil {
+		return nil
+	}
+	return &t
+}
+func (a *App) createSource(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Name  string `json:"name"`
+		URL   string `json:"url"`
+		Every int    `json:"refreshIntervalSeconds"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	in.Name = strings.TrimSpace(in.Name)
+	if len(in.Name) == 0 || len(in.Name) > maxNameLength || len(in.URL) > 4096 {
+		apiError(w, 400, "invalid_input", "Name and URL are required")
+		return
+	}
+	u, e := url.Parse(in.URL)
+	if e != nil || validateURL(u) != nil {
+		apiError(w, 400, "invalid_url", "A public HTTP or HTTPS URL is required")
+		return
+	}
+	if in.Every == 0 {
+		in.Every = defaultEvery
+	}
+	if in.Every < 60 || in.Every > 7*86400 {
+		apiError(w, 400, "invalid_interval", "Refresh interval must be between 60 and 604800 seconds")
+		return
+	}
+	id, e := newID()
+	if e != nil {
+		internal(w)
+		return
+	}
+	enc, e := a.encrypt([]byte(in.URL))
+	if e != nil {
+		internal(w)
+		return
+	}
+	now := time.Now().UTC()
+	_, e = a.db.Exec(`INSERT INTO subscriptions(id,name,encrypted_url,enabled,refresh_interval,created_at,status,next_refresh_at) VALUES(?,?,?,1,?,?,'pending',?)`, id, in.Name, enc, in.Every, stamp(now), stamp(now))
+	if e != nil {
+		internal(w)
+		return
+	}
+	s := Source{ID: id, Name: in.Name, Enabled: true, RefreshIntervalSeconds: in.Every, Status: "pending"}
+	jsonResponse(w, 201, s)
+	go a.refresh(id)
+}
+func (a *App) sourceRoute(w http.ResponseWriter, r *http.Request, rest string) {
+	parts := strings.Split(rest, "/")
+	id := parts[0]
+	if id == "" {
+		apiError(w, 404, "not_found", "Not found")
+		return
+	}
+	if len(parts) == 1 {
+		switch r.Method {
+		case http.MethodGet:
+			a.getSource(w, id)
+		case http.MethodPatch:
+			a.patchSource(w, r, id)
+		case http.MethodDelete:
+			a.deleteSource(w, id)
+		default:
+			method(w)
+		}
+		return
+	}
+	if len(parts) == 2 && parts[1] == "refresh" && r.Method == http.MethodPost {
+		if !a.beginRefresh(id) {
+			apiError(w, 404, "not_found", "Subscription not found")
+			return
+		}
+		run, _ := newID()
+		jsonResponse(w, 202, map[string]string{"runId": run, "status": "queued"})
+		go a.refreshStarted(id)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "nodes" && r.Method == http.MethodGet {
+		a.sourceNodes(w, id)
+		return
+	}
+	apiError(w, 404, "not_found", "Not found")
+}
+func (a *App) getSource(w http.ResponseWriter, id string) {
+	var s Source
+	var en int
+	var at, ok sql.NullString
+	e := a.db.QueryRow(`SELECT id,name,enabled,refresh_interval,node_count,last_attempt_at,last_success_at,status,error_code FROM subscriptions WHERE id=?`, id).Scan(&s.ID, &s.Name, &en, &s.RefreshIntervalSeconds, &s.NodeCount, &at, &ok, &s.Status, &s.ErrorCode)
+	if e == sql.ErrNoRows {
+		apiError(w, 404, "not_found", "Subscription not found")
+		return
+	}
+	if e != nil {
+		internal(w)
+		return
+	}
+	s.Enabled = en != 0
+	s.LastAttemptAt = parseTime(at)
+	s.LastSuccessAt = parseTime(ok)
+	jsonResponse(w, 200, s)
+}
+func (a *App) patchSource(w http.ResponseWriter, r *http.Request, id string) {
+	var in map[string]json.RawMessage
+	if !decode(w, r, &in) {
+		return
+	}
+	var name, urlText string
+	var enabled bool
+	var every int
+	var exists int
+	e := a.db.QueryRow(`SELECT count(*) FROM subscriptions WHERE id=?`, id).Scan(&exists)
+	if e != nil || exists == 0 {
+		apiError(w, 404, "not_found", "Subscription not found")
+		return
+	}
+	if b, ok := in["name"]; ok {
+		if json.Unmarshal(b, &name) != nil || strings.TrimSpace(name) == "" || len(name) > maxNameLength {
+			apiError(w, 400, "invalid_name", "Invalid subscription name")
+			return
+		}
+		name = strings.TrimSpace(name)
+		_, e = a.db.Exec(`UPDATE subscriptions SET name=? WHERE id=?`, name, id)
+		if e != nil {
+			internal(w)
+			return
+		}
+	}
+	if b, ok := in["url"]; ok {
+		if json.Unmarshal(b, &urlText) != nil || len(urlText) > 4096 {
+			apiError(w, 400, "invalid_url", "Invalid subscription URL")
+			return
+		}
+		u, pe := url.Parse(urlText)
+		if pe != nil || validateURL(u) != nil {
+			apiError(w, 400, "invalid_url", "A public HTTP or HTTPS URL is required")
+			return
+		}
+		enc, ee := a.encrypt([]byte(urlText))
+		if ee != nil {
+			internal(w)
+			return
+		}
+		_, e = a.db.Exec(`UPDATE subscriptions SET encrypted_url=?,status='pending',error_code='',next_refresh_at=? WHERE id=?`, enc, stamp(time.Now().UTC()), id)
+		if e != nil {
+			internal(w)
+			return
+		}
+		go a.refresh(id)
+	}
+	if b, ok := in["enabled"]; ok {
+		if json.Unmarshal(b, &enabled) != nil {
+			apiError(w, 400, "invalid_enabled", "Enabled must be boolean")
+			return
+		}
+		val := 0
+		if enabled {
+			val = 1
+		}
+		_, e = a.db.Exec(`UPDATE subscriptions SET enabled=?,status=CASE WHEN ?=0 THEN 'disabled' ELSE 'pending' END,next_refresh_at=? WHERE id=?`, val, val, stamp(time.Now().UTC()), id)
+		if e != nil {
+			internal(w)
+			return
+		}
+		if enabled {
+			go a.refresh(id)
+		} else if e = a.regenerate(); e != nil {
+			apiError(w, 409, "output_unavailable", "Could not safely regenerate output")
+			return
+		}
+	}
+	if b, ok := in["refreshIntervalSeconds"]; ok {
+		if json.Unmarshal(b, &every) != nil || every < 60 || every > 7*86400 {
+			apiError(w, 400, "invalid_interval", "Refresh interval must be between 60 and 604800 seconds")
+			return
+		}
+		_, e = a.db.Exec(`UPDATE subscriptions SET refresh_interval=?,next_refresh_at=? WHERE id=?`, every, stamp(time.Now().UTC().Add(time.Duration(every)*time.Second)), id)
+		if e != nil {
+			internal(w)
+			return
+		}
+	}
+	a.getSource(w, id)
+}
+func (a *App) deleteSource(w http.ResponseWriter, id string) {
+	_, e := a.db.Exec(`DELETE FROM subscriptions WHERE id=?`, id)
+	if e != nil {
+		internal(w)
+		return
+	}
+	if a.regenerate() != nil {
+		apiError(w, 409, "output_unavailable", "Could not safely regenerate output")
+		return
+	}
+	w.WriteHeader(204)
+}
+func (a *App) sourceNodes(w http.ResponseWriter, id string) {
+	if !a.exists(id) {
+		apiError(w, 404, "not_found", "Subscription not found")
+		return
+	}
+	nodes, err := a.allNodes(false)
+	if err != nil {
+		internal(w)
+		return
+	}
+	items := []Node{}
+	for _, node := range nodes {
+		if node.SourceID == id {
+			items = append(items, node)
+		}
+	}
+	jsonResponse(w, 200, map[string]interface{}{"items": items, "total": len(items)})
+}
+func (a *App) listNodes(w http.ResponseWriter, r *http.Request) {
+	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	sub := r.URL.Query().Get("subscriptionId")
+	limit := parseInt(r.URL.Query().Get("limit"), 100)
+	offset := parseInt(r.URL.Query().Get("offset"), 0)
+	if limit < 1 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	nodes, e := a.allNodes(false)
+	if e != nil {
+		internal(w)
+		return
+	}
+	filtered := []Node{}
+	for _, n := range nodes {
+		if sub != "" && n.SourceID != sub {
+			continue
+		}
+		if q != "" && !strings.Contains(strings.ToLower(n.Name), q) && !strings.Contains(strings.ToLower(n.Type), q) && !strings.Contains(strings.ToLower(n.SourceName), q) {
+			continue
+		}
+		n.Selected = n.Name == a.currentSelection("PROXY")
+		filtered = append(filtered, n)
+	}
+	total := len(filtered)
+	if offset > total {
+		offset = total
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	jsonResponse(w, 200, map[string]interface{}{"items": filtered[offset:end], "total": total})
+}
+func (a *App) outputInfo(w http.ResponseWriter) {
+	var encryptedToken []byte
+	var public string
+	var rev int
+	var generated sql.NullString
+	var config []byte
+	e := a.db.QueryRow(`SELECT encrypted_token,public_url,revision,generated_at,config FROM output_settings WHERE id=1`).Scan(&encryptedToken, &public, &rev, &generated, &config)
+	if e != nil {
+		internal(w)
+		return
+	}
+	tokenBytes, e := a.decrypt(encryptedToken)
+	if e != nil {
+		internal(w)
+		return
+	}
+	token := string(tokenBytes)
+	nodes, nodeErr := a.allNodes(true)
+	if nodeErr != nil {
+		internal(w)
+		return
+	}
+	status := "healthy"
+	if len(nodes) == 0 {
+		status = "no_nodes"
+	} else if len(config) == 0 {
+		status = "pending"
+	}
+	u := public + "/s/" + token
+	if public == "" {
+		u = "/s/" + token
+	}
+	var gt interface{} = nil
+	if generated.Valid {
+		gt = parseTime(generated)
+	}
+	jsonResponse(w, 200, map[string]interface{}{"status": status, "nodeCount": len(nodes), "generatedAt": gt, "revision": rev, "url": u, "selectedGroup": "PROXY"})
+}
+func (a *App) rotateToken(w http.ResponseWriter) {
+	t, e := randomToken()
+	if e != nil {
+		internal(w)
+		return
+	}
+	encrypted, encErr := a.encrypt([]byte(t))
+	if encErr != nil {
+		internal(w)
+		return
+	}
+	_, e = a.db.Exec(`UPDATE output_settings SET token_hash=?,encrypted_token=? WHERE id=1`, hash(t), encrypted)
+	if e != nil {
+		internal(w)
+		return
+	}
+	var public string
+	_ = a.db.QueryRow(`SELECT public_url FROM output_settings WHERE id=1`).Scan(&public)
+	u := public + "/s/" + t
+	if public == "" {
+		u = "/s/" + t
+	}
+	jsonResponse(w, 200, map[string]interface{}{"url": u, "rotatedAt": stamp(time.Now().UTC())})
+}
+func (a *App) subscription(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		method(w)
+		return
+	}
+	token := strings.TrimPrefix(r.URL.Path, "/s/")
+	if token == "" || strings.Contains(token, "/") {
+		apiError(w, 404, "not_found", "Subscription not found")
+		return
+	}
+	var want string
+	var config []byte
+	err := a.db.QueryRow(`SELECT token_hash,config FROM output_settings WHERE id=1`).Scan(&want, &config)
+	if err != nil || !constantEqual(want, hash(token)) {
+		apiError(w, 404, "not_found", "Subscription not found")
+		return
+	}
+	if len(config) == 0 {
+		apiError(w, 503, "output_unavailable", "No valid output is available")
+		return
+	}
+	w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(200)
+	_, _ = w.Write(config)
+}
+func (a *App) delayTest(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		URL     string `json:"url"`
+		Timeout int    `json:"timeoutMs"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	if in.Timeout < 1 || in.Timeout > 30000 {
+		in.Timeout = 5000
+	}
+	if a.controller == "" {
+		apiError(w, 503, "mihomo_unavailable", "Delay testing requires a Mihomo controller")
+		return
+	}
+	id := strings.TrimPrefix(r.URL.Path, "/api/v1/nodes/")
+	id = strings.TrimSuffix(id, "/delay-test")
+	var node *Node
+	nodes, _ := a.allNodes(true)
+	for i := range nodes {
+		if nodes[i].ID == id {
+			node = &nodes[i]
+			break
+		}
+	}
+	if node == nil {
+		apiError(w, 404, "not_found", "Node not found")
+		return
+	}
+	endpoint := a.controller + "/proxies/" + url.PathEscape(node.Name) + "/delay?url=" + url.QueryEscape(in.URL) + "&timeout=" + strconv.Itoa(in.Timeout)
+	req, _ := http.NewRequest("GET", endpoint, nil)
+	a.controllerAuth(req)
+	resp, e := http.DefaultClient.Do(req)
+	if e != nil {
+		apiError(w, 502, "mihomo_error", "Delay test failed")
+		return
+	}
+	defer resp.Body.Close()
+	var out struct {
+		Delay int `json:"delay"`
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 || json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&out) != nil {
+		apiError(w, 502, "mihomo_error", "Delay test failed")
+		return
+	}
+	jsonResponse(w, 200, map[string]int{"delayMs": out.Delay})
+}
+func (a *App) selectProxy(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Name string `json:"name"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	group := strings.TrimPrefix(r.URL.Path, "/api/v1/proxy-groups/")
+	group = strings.TrimSuffix(group, "/selection")
+	if group == "" || len(group) > 100 || in.Name == "" {
+		apiError(w, 400, "invalid_selection", "Group and node are required")
+		return
+	}
+	if a.controller != "" {
+		body, _ := json.Marshal(map[string]string{"name": in.Name})
+		req, _ := http.NewRequest("PUT", a.controller+"/proxies/"+url.PathEscape(group), strings.NewReader(string(body)))
+		req.Header.Set("Content-Type", "application/json")
+		a.controllerAuth(req)
+		resp, e := http.DefaultClient.Do(req)
+		if e != nil {
+			apiError(w, 502, "mihomo_error", "Could not change proxy selection")
+			return
+		}
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			apiError(w, 502, "mihomo_error", "Could not change proxy selection")
+			return
+		}
+	} else {
+		nodes, e := a.allNodes(false)
+		if e != nil {
+			internal(w)
+			return
+		}
+		found := in.Name == "DIRECT"
+		for _, n := range nodes {
+			if n.Name == in.Name {
+				found = true
+				break
+			}
+		}
+		if !found {
+			apiError(w, 404, "not_found", "Proxy not found")
+			return
+		}
+	}
+	_, e := a.db.Exec(`INSERT INTO proxy_selection(group_name,node_name) VALUES(?,?) ON CONFLICT(group_name) DO UPDATE SET node_name=excluded.node_name`, group, in.Name)
+	if e != nil {
+		internal(w)
+		return
+	}
+	w.WriteHeader(204)
+}
+func (a *App) controllerAuth(r *http.Request) {
+	if a.controllerSecret != "" {
+		r.Header.Set("Authorization", "Bearer "+a.controllerSecret)
+	}
+}
+func (a *App) currentSelection(group string) string {
+	var n string
+	_ = a.db.QueryRow(`SELECT node_name FROM proxy_selection WHERE group_name=?`, group).Scan(&n)
+	return n
+}
+func (a *App) exists(id string) bool {
+	var n int
+	return a.db.QueryRow(`SELECT count(*) FROM subscriptions WHERE id=?`, id).Scan(&n) == nil && n > 0
+}
+func (a *App) allNodes(enabledOnly bool) ([]Node, error) {
+	query := `SELECT s.id,s.name,x.nodes_json FROM subscriptions s JOIN snapshots x ON x.subscription_id=s.id`
+	if enabledOnly {
+		query += ` WHERE s.enabled=1`
+	}
+	query += ` ORDER BY s.created_at,s.id`
+	rows, err := a.db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Node{}
+	for rows.Next() {
+		var sid, sourceName string
+		var data []byte
+		if err := rows.Scan(&sid, &sourceName, &data); err != nil {
+			return nil, err
+		}
+		var stored []snapshotNode
+		if json.Unmarshal(data, &stored) != nil {
+			continue
+		}
+		for _, item := range stored {
+			node := item.Node
+			node.Raw = item.Proxy
+			out = append(out, node)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	reserved, err := a.baseConfigNames()
+	if err != nil {
+		return nil, err
+	}
+	used := reserved
+	for i := range out {
+		name := out[i].Name
+		if used[name] {
+			suffix := out[i].SourceID
+			if len(suffix) > 6 {
+				suffix = suffix[:6]
+			}
+			base := fmt.Sprintf("%s [%s]", name, suffix)
+			name = base
+			for n := 2; used[name]; n++ {
+				name = fmt.Sprintf("%s-%d", base, n)
+			}
+		}
+		used[name] = true
+		out[i].Name = name
+		if out[i].Raw != nil {
+			out[i].Raw["name"] = name
+		}
+	}
+	return out, nil
+}
+func (a *App) refresh(id string) {
+	if a.beginRefresh(id) {
+		a.refreshStarted(id)
+	}
+}
+func (a *App) beginRefresh(id string) bool {
+	a.refreshMu.Lock()
+	defer a.refreshMu.Unlock()
+	if a.refreshing[id] || !a.exists(id) {
+		return false
+	}
+	a.refreshing[id] = true
+	return true
+}
+func (a *App) refreshStarted(id string) {
+	defer func() { a.refreshMu.Lock(); delete(a.refreshing, id); a.refreshMu.Unlock() }()
+	var name string
+	var enc []byte
+	err := a.db.QueryRow(`SELECT name,encrypted_url FROM subscriptions WHERE id=?`, id).Scan(&name, &enc)
+	if err != nil {
+		return
+	}
+	now := time.Now().UTC()
+	_, _ = a.db.Exec(`UPDATE subscriptions SET last_attempt_at=?,status=CASE WHEN status='healthy' THEN 'degraded' ELSE status END WHERE id=?`, stamp(now), id)
+	plain, err := a.decrypt(enc)
+	if err != nil {
+		a.refreshFailed(id, "stored_secret_invalid")
+		return
+	}
+	u, e := url.Parse(string(plain))
+	if e != nil || validateURL(u) != nil {
+		a.refreshFailed(id, "blocked_url")
+		return
+	}
+	req, e := http.NewRequestWithContext(context.Background(), "GET", u.String(), nil)
+	if e != nil {
+		a.refreshFailed(id, "invalid_url")
+		return
+	}
+	resp, e := a.client.Do(req)
+	if e != nil {
+		a.refreshFailed(id, safeFetchCode(e))
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		a.refreshFailed(id, "upstream_http_error")
+		return
+	}
+	body, e := io.ReadAll(io.LimitReader(resp.Body, maxFetchBytes+1))
+	if e != nil || len(body) > maxFetchBytes {
+		a.refreshFailed(id, "response_too_large")
+		return
+	}
+	nodes, e := parseNodes(body, id, name)
+	if e != nil {
+		a.refreshFailed(id, "invalid_subscription")
+		return
+	}
+	if len(nodes) == 0 {
+		a.refreshFailed(id, "no_nodes")
+		return
+	}
+	stored := make([]snapshotNode, 0, len(nodes))
+	for _, node := range nodes {
+		stored = append(stored, snapshotNode{Node: node, Proxy: node.Raw})
+	}
+	encoded, e := json.Marshal(stored)
+	if e != nil {
+		a.refreshFailed(id, "invalid_subscription")
+		return
+	}
+	tx, e := a.db.Begin()
+	if e != nil {
+		a.refreshFailed(id, "storage_error")
+		return
+	}
+	_, e = tx.Exec(`INSERT INTO snapshots(subscription_id,nodes_json,updated_at) VALUES(?,?,?) ON CONFLICT(subscription_id) DO UPDATE SET nodes_json=excluded.nodes_json,updated_at=excluded.updated_at`, id, encoded, stamp(now))
+	if e == nil {
+		_, e = tx.Exec(`UPDATE subscriptions SET node_count=?,last_success_at=?,status='healthy',error_code='',next_refresh_at=? WHERE id=?`, len(nodes), stamp(now), stamp(now.Add(time.Duration(a.interval(id))*time.Second)), id)
+	}
+	if e != nil {
+		tx.Rollback()
+		a.refreshFailed(id, "storage_error")
+		return
+	}
+	if tx.Commit() != nil {
+		a.refreshFailed(id, "storage_error")
+		return
+	}
+	if e = a.regenerate(); e != nil {
+		_, _ = a.db.Exec(`UPDATE subscriptions SET status='degraded',error_code='output_generation_failed' WHERE id=?`, id)
+	}
+}
+func safeFetchCode(e error) string {
+	s := strings.ToLower(e.Error())
+	switch {
+	case strings.Contains(s, "blocked_address"):
+		return "blocked_address"
+	case strings.Contains(s, "dns"):
+		return "dns_error"
+	case strings.Contains(s, "timeout"):
+		return "upstream_timeout"
+	case strings.Contains(s, "redirect"):
+		return "redirect_rejected"
+	default:
+		return "upstream_error"
+	}
+}
+func (a *App) refreshFailed(id, code string) {
+	_, _ = a.db.Exec(`UPDATE subscriptions SET status='failed',error_code=?,next_refresh_at=? WHERE id=?`, code, stamp(time.Now().UTC().Add(time.Minute)), id)
+}
+func (a *App) interval(id string) int {
+	var n int
+	_ = a.db.QueryRow(`SELECT refresh_interval FROM subscriptions WHERE id=?`, id).Scan(&n)
+	if n < 60 {
+		n = defaultEvery
+	}
+	return n
+}
+func (a *App) scheduler() {
+	t := time.NewTicker(30 * time.Second)
+	defer t.Stop()
+	for range t.C {
+		rows, e := a.db.Query(`SELECT id FROM subscriptions WHERE enabled=1 AND next_refresh_at<=?`, stamp(time.Now().UTC()))
+		if e != nil {
+			continue
+		}
+		ids := []string{}
+		for rows.Next() {
+			var id string
+			if rows.Scan(&id) == nil {
+				ids = append(ids, id)
+			}
+		}
+		rows.Close()
+		for _, id := range ids {
+			go a.refresh(id)
+		}
+	}
+}
+func parseNodes(body []byte, sourceID, sourceName string) ([]Node, error) {
+	data := body
+	var doc map[string]interface{}
+	if yaml.Unmarshal(data, &doc) != nil || doc["proxies"] == nil {
+		decoded, e := base64.StdEncoding.DecodeString(strings.TrimSpace(string(body)))
+		if e != nil {
+			decoded, e = base64.RawStdEncoding.DecodeString(strings.TrimSpace(string(body)))
+		}
+		if e != nil {
+			return nil, errors.New("bad_yaml")
+		}
+		data = decoded
+		if yaml.Unmarshal(data, &doc) != nil {
+			return nil, errors.New("bad_yaml")
+		}
+	}
+	list, ok := doc["proxies"].([]interface{})
+	if !ok || len(list) > maxNodes {
+		return nil, errors.New("bad_proxies")
+	}
+	out := []Node{}
+	seen := map[string]int{}
+	for _, item := range list {
+		raw, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name, ok := raw["name"].(string)
+		if !ok || strings.TrimSpace(name) == "" || len(name) > maxNameLength {
+			continue
+		}
+		typ, ok := raw["type"].(string)
+		if !ok || typ == "" || len(typ) > 40 {
+			continue
+		}
+		base := strings.TrimSpace(sourceName) + " / " + strings.TrimSpace(name)
+		seen[base]++
+		mergedName := base
+		if seen[base] > 1 {
+			mergedName = fmt.Sprintf("%s (%d)", base, seen[base])
+		}
+		raw["name"] = mergedName
+		buf, e := json.Marshal(raw)
+		if e != nil {
+			continue
+		}
+		sum := sha256.Sum256(append([]byte(sourceID+"\x00"), buf...))
+		out = append(out, Node{ID: hex.EncodeToString(sum[:12]), Name: mergedName, Type: typ, SourceID: sourceID, SourceName: sourceName, Raw: raw})
+	}
+	return out, nil
+}
+func (a *App) edgeConfigured() bool {
+	return a.baseConfigPath != "" || a.edgeConfigPath != "" || a.mihomoBin != ""
+}
+
+func (a *App) validateEdgeSettings() error {
+	if !a.edgeConfigured() {
+		return nil
+	}
+	if a.baseConfigPath == "" || a.edgeConfigPath == "" || a.mihomoBin == "" || a.controller == "" || a.controllerSecret == "" {
+		return errors.New("incomplete edge publishing configuration")
+	}
+	for _, p := range []string{a.baseConfigPath, a.edgeConfigPath} {
+		if !filepath.IsAbs(p) {
+			return errors.New("edge config paths must be absolute")
+		}
+	}
+	if filepath.Clean(a.baseConfigPath) == filepath.Clean(a.edgeConfigPath) {
+		return errors.New("base and generated config paths must differ")
+	}
+	baseInfo, err := os.Lstat(a.baseConfigPath)
+	if err != nil || !baseInfo.Mode().IsRegular() {
+		return errors.New("base config must be a regular file")
+	}
+	edgeDir := filepath.Dir(a.edgeConfigPath)
+	dirInfo, err := os.Lstat(edgeDir)
+	if err != nil || !dirInfo.IsDir() || dirInfo.Mode()&os.ModeSymlink != 0 {
+		return errors.New("generated config directory must already exist and be a real directory")
+	}
+	if info, err := os.Lstat(a.edgeConfigPath); err == nil && !info.Mode().IsRegular() {
+		return errors.New("generated config must be a regular file")
+	} else if err != nil && !os.IsNotExist(err) {
+		return errors.New("cannot inspect generated config")
+	}
+	if !filepath.IsAbs(a.mihomoBin) {
+		return errors.New("Mihomo executable path must be absolute")
+	}
+	binInfo, err := os.Stat(a.mihomoBin)
+	if err != nil || !binInfo.Mode().IsRegular() || binInfo.Mode()&0111 == 0 {
+		return errors.New("Mihomo executable is unavailable")
+	}
+	controllerURL, err := url.Parse(a.controller)
+	if err != nil || controllerURL.Scheme != "http" || controllerURL.User != nil {
+		return errors.New("Mihomo controller must be local HTTP")
+	}
+	controllerIP := net.ParseIP(controllerURL.Hostname())
+	if controllerIP == nil || !controllerIP.IsLoopback() || controllerURL.Port() == "" {
+		return errors.New("Mihomo controller must use an explicit loopback address and port")
+	}
+	if _, err := os.ReadFile(a.baseConfigPath); err != nil {
+		return errors.New("cannot read base config")
+	}
+	return nil
+}
+
+func (a *App) baseConfigNames() (map[string]bool, error) {
+	reserved := map[string]bool{}
+	if !a.edgeConfigured() {
+		return reserved, nil
+	}
+	data, err := os.ReadFile(a.baseConfigPath)
+	if err != nil {
+		return nil, errors.New("cannot read edge base config")
+	}
+	var cfg map[string]interface{}
+	if err := yaml.Unmarshal(data, &cfg); err != nil || cfg == nil {
+		return nil, errors.New("invalid edge base config")
+	}
+	if list, ok := cfg["proxies"].([]interface{}); ok {
+		for _, item := range list {
+			if proxy, ok := item.(map[string]interface{}); ok {
+				if name, ok := proxy["name"].(string); ok && name != "" {
+					reserved[name] = true
+				}
+			}
+		}
+	}
+	if list, ok := cfg["proxy-groups"].([]interface{}); ok {
+		for _, item := range list {
+			if group, ok := item.(map[string]interface{}); ok {
+				if name, ok := group["name"].(string); ok && name != "" {
+					reserved[name] = true
+				}
+			}
+		}
+	}
+	return reserved, nil
+}
+
+func buildEdgeConfig(base []byte, nodes []Node) ([]byte, error) {
+	var cfg map[string]interface{}
+	if err := yaml.Unmarshal(base, &cfg); err != nil || cfg == nil {
+		return nil, errors.New("invalid edge base config")
+	}
+	proxies, ok := cfg["proxies"].([]interface{})
+	if !ok && cfg["proxies"] != nil {
+		return nil, errors.New("invalid base proxies")
+	}
+	if proxies == nil {
+		proxies = []interface{}{}
+	}
+	members := []string{}
+	seenMembers := map[string]bool{}
+	addMember := func(name string) {
+		if name != "" && !seenMembers[name] {
+			seenMembers[name] = true
+			members = append(members, name)
+		}
+	}
+	for _, item := range proxies {
+		if proxy, ok := item.(map[string]interface{}); ok {
+			if name, ok := proxy["name"].(string); ok {
+				addMember(name)
+			}
+		}
+	}
+	for _, node := range nodes {
+		if node.Raw == nil {
+			continue
+		}
+		proxies = append(proxies, node.Raw)
+		addMember(node.Name)
+	}
+	groups, ok := cfg["proxy-groups"].([]interface{})
+	if !ok && cfg["proxy-groups"] != nil {
+		return nil, errors.New("invalid base proxy groups")
+	}
+	outGroups := make([]interface{}, 0, len(groups)+1)
+	foundProxyGroup := false
+	for _, item := range groups {
+		group, ok := item.(map[string]interface{})
+		if !ok {
+			return nil, errors.New("invalid base proxy group")
+		}
+		name, _ := group["name"].(string)
+		if name != "PROXY" {
+			outGroups = append(outGroups, item)
+			continue
+		}
+		if foundProxyGroup {
+			return nil, errors.New("duplicate reserved PROXY group")
+		}
+		foundProxyGroup = true
+		if oldMembers, ok := group["proxies"].([]interface{}); ok {
+			for _, value := range oldMembers {
+				if name, ok := value.(string); ok {
+					addMember(name)
+				}
+			}
+		}
+		addMember("DIRECT")
+		group["name"] = "PROXY"
+		group["type"] = "select"
+		group["proxies"] = append([]string(nil), members...)
+		outGroups = append(outGroups, group)
+	}
+	if !foundProxyGroup {
+		addMember("DIRECT")
+		outGroups = append(outGroups, map[string]interface{}{"name": "PROXY", "type": "select", "proxies": append([]string(nil), members...)})
+	}
+	cfg["proxies"] = proxies
+	cfg["proxy-groups"] = outGroups
+	return yaml.Marshal(cfg)
+}
+
+func atomicWrite(path string, data []byte, mode os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".clash-cloud-*.yaml")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	ok := false
+	defer func() {
+		tmp.Close()
+		if !ok {
+			os.Remove(tmpName)
+		}
+	}()
+	if err := tmp.Chmod(mode); err != nil {
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	if dir, err := os.Open(filepath.Dir(path)); err == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
+	}
+	ok = true
+	return nil
+}
+
+func (a *App) reloadCore() error {
+	body := strings.NewReader(`{"path":"","payload":""}`)
+	req, err := http.NewRequest(http.MethodPut, a.controller+"/configs?force=true", body)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	a.controllerAuth(req)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("controller rejected reload")
+	}
+	return nil
+}
+
+func (a *App) publishEdge(candidate []byte) (func(), error) {
+	if !a.edgeConfigured() {
+		return func() {}, nil
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(a.edgeConfigPath), ".clash-cloud-check-*.yaml")
+	if err != nil {
+		return nil, errors.New("cannot create edge candidate")
+	}
+	tmpPath := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpPath) }
+	if err := tmp.Chmod(0640); err != nil {
+		tmp.Close()
+		cleanup()
+		return nil, errors.New("cannot set edge candidate permissions")
+	}
+	if _, err := tmp.Write(candidate); err != nil {
+		tmp.Close()
+		cleanup()
+		return nil, errors.New("cannot write edge candidate")
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		cleanup()
+		return nil, errors.New("cannot sync edge candidate")
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return nil, errors.New("cannot close edge candidate")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, a.mihomoBin, "-t", "-f", tmpPath)
+	if _, err := cmd.CombinedOutput(); err != nil {
+		cleanup()
+		return nil, errors.New("Mihomo rejected edge candidate")
+	}
+	cleanup()
+
+	var old []byte
+	var oldMode os.FileMode = 0640
+	oldInfo, err := os.Lstat(a.edgeConfigPath)
+	oldExists := err == nil
+	if oldExists {
+		if !oldInfo.Mode().IsRegular() {
+			return nil, errors.New("edge target is not a regular file")
+		}
+		oldMode = oldInfo.Mode().Perm()
+		old, err = os.ReadFile(a.edgeConfigPath)
+		if err != nil {
+			return nil, errors.New("cannot read current edge config")
+		}
+	} else if !os.IsNotExist(err) {
+		return nil, errors.New("cannot inspect current edge config")
+	}
+	if oldExists && bytes.Equal(old, candidate) {
+		return func() {}, nil
+	}
+	restore := func() {
+		if oldExists {
+			_ = atomicWrite(a.edgeConfigPath, old, oldMode)
+		} else {
+			_ = os.Remove(a.edgeConfigPath)
+		}
+		_ = a.reloadCore()
+	}
+	if err := atomicWrite(a.edgeConfigPath, candidate, 0640); err != nil {
+		return nil, errors.New("cannot atomically publish edge config")
+	}
+	if err := a.reloadCore(); err != nil {
+		restore()
+		return nil, errors.New("Mihomo reload failed; previous edge config restored")
+	}
+	return restore, nil
+}
+
+func (a *App) regenerate() error {
+	nodes, err := a.allNodes(true)
+	if err != nil {
+		return err
+	}
+	proxies := make([]map[string]interface{}, 0, len(nodes))
+	names := []string{}
+	for _, node := range nodes {
+		if node.Raw != nil {
+			proxies = append(proxies, node.Raw)
+			names = append(names, node.Name)
+		}
+	}
+	group := map[string]interface{}{"name": "PROXY", "type": "select", "proxies": append(names, "DIRECT")}
+	config := map[string]interface{}{"mixed-port": 7890, "allow-lan": false, "mode": "rule", "log-level": "info", "proxies": proxies, "proxy-groups": []interface{}{group}, "rules": []string{"MATCH,PROXY"}}
+	publicConfig, err := yaml.Marshal(config)
+	if err != nil {
+		return err
+	}
+	var edgeConfig []byte
+	if a.edgeConfigured() {
+		base, err := os.ReadFile(a.baseConfigPath)
+		if err != nil {
+			return errors.New("cannot read edge base config")
+		}
+		edgeConfig, err = buildEdgeConfig(base, nodes)
+		if err != nil {
+			return err
+		}
+	}
+	rollback, err := a.publishEdge(edgeConfig)
+	if err != nil {
+		return err
+	}
+	var old []byte
+	_ = a.db.QueryRow(`SELECT config FROM output_settings WHERE id=1`).Scan(&old)
+	if bytes.Equal(old, publicConfig) {
+		return nil
+	}
+	_, err = a.db.Exec(`UPDATE output_settings SET config=?,generated_at=?,revision=revision+1 WHERE id=1`, publicConfig, stamp(time.Now().UTC()))
+	if err != nil {
+		rollback()
+		return err
+	}
+	return nil
+}
+
+func stamp(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }
+func parseInt(s string, d int) int {
+	if s == "" {
+		return d
+	}
+	n, e := strconv.Atoi(s)
+	if e != nil {
+		return d
+	}
+	return n
+}
+func newID() (string, error) {
+	b := make([]byte, 16)
+	if _, e := rand.Read(b); e != nil {
+		return "", e
+	}
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
+}
+func decode(w http.ResponseWriter, r *http.Request, v interface{}) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	d := json.NewDecoder(r.Body)
+	d.DisallowUnknownFields()
+	if d.Decode(v) != nil {
+		apiError(w, 400, "invalid_json", "Invalid JSON request")
+		return false
+	}
+	return true
+}
+func jsonResponse(w http.ResponseWriter, status int, v interface{}) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+func apiError(w http.ResponseWriter, status int, code, message string) {
+	jsonResponse(w, status, map[string]interface{}{"error": map[string]string{"code": code, "message": message}})
+}
+func internal(w http.ResponseWriter) { apiError(w, 500, "internal_error", "Internal server error") }
+func method(w http.ResponseWriter) {
+	w.Header().Set("Allow", "GET, POST, PATCH, DELETE")
+	apiError(w, 405, "method_not_allowed", "Method not allowed")
+}
+func accessLog(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		next.ServeHTTP(w, r)
+		if !strings.HasPrefix(r.URL.Path, "/s/") {
+			log.Printf("method=%s path=%s elapsed_ms=%d", r.Method, path.Clean(r.URL.Path), time.Since(start).Milliseconds())
+		}
+	})
+}
+func constantEqual(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	var x byte
+	for i := range a {
+		x |= a[i] ^ b[i]
+	}
+	return x == 0
+}

@@ -1,0 +1,38 @@
+[Unit]
+Description=Clash Cloud Mihomo edge core
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/var/lib/clash-cloud/edge /var/lib/clash-edge
+
+[Service]
+Type=simple
+User=clash-edge
+Group=clash-cloud-edge
+UMask=0077
+StateDirectory=clash-edge
+StateDirectoryMode=0700
+WorkingDirectory=/var/lib/clash-edge
+Environment=SAFE_PATHS=/var/lib/clash-cloud/edge
+ExecStartPre=/usr/local/bin/clash -t -f /var/lib/clash-cloud/edge/clash-edge.yaml
+ExecStart=/usr/local/bin/clash -d /var/lib/clash-edge -f /var/lib/clash-cloud/edge/clash-edge.yaml
+Restart=on-failure
+RestartSec=3
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths=/var/lib/clash-edge
+ReadOnlyPaths=/var/lib/clash-cloud/edge
+
+[Install]
+WantedBy=multi-user.target
