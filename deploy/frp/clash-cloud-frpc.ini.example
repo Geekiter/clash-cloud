@@ -1,0 +1,10 @@
+[common]
+server_addr = 127.0.0.1
+server_port = 8004
+token = replace-with-token-from-protected-frps-config
+
+[clash-cloud]
+type = http
+local_ip = 127.0.0.1
+local_port = 18080
+custom_domains = clash-cloud.chenkeyan.com

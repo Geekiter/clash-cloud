@@ -1,34 +1,63 @@
-# Include map and log_format in the http {} context.
-map $uri $clash_cloud_log_uri {
-    default $uri;
-    ~^/s/[^/]+$ /s/[token-redacted];
+# Public TLS ingress for Clash Cloud. Add to the tx Nginx sites-enabled set
+# after replacing both copies of the ingress-header value with one random secret.
+# The matching loopback-only FRP destination is in clash-cloud-internal.conf.example.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name clash-cloud.chenkeyan.com;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/letsencrypt;
+        default_type text/plain;
+    }
+
+    location ^~ /s/ {
+        access_log off;
+        return 301 https://$host$request_uri;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
 }
 
-log_format clash_cloud '$remote_addr [$time_local] '
-                       '"$request_method $clash_cloud_log_uri $server_protocol" '
-                       '$status $body_bytes_sent';
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name clash-cloud.chenkeyan.com;
 
-# Add these locations inside the existing TLS server block. Keep the API
-# authentication include mandatory and point it at the site's approved admin
-# authentication mechanism.
-location ^~ /api/v1/ {
-    include /etc/nginx/snippets/clash-cloud-admin-auth.conf;
-    proxy_pass http://127.0.0.1:8080;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    ssl_certificate /etc/letsencrypt/live/clash-cloud.chenkeyan.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/clash-cloud.chenkeyan.com/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    auth_basic "Clash Cloud";
+    auth_basic_user_file /etc/nginx/clash-cloud-admin.htpasswd;
+
+    location ^~ /s/ {
+        auth_basic off;
+        access_log off;
+        proxy_pass http://127.0.0.1:8007;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Clash-Cloud-Ingress replace-with-shared-random-ingress-secret;
+        proxy_set_header Authorization "";
+        proxy_set_header Cookie "";
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:8007;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Clash-Cloud-Ingress replace-with-shared-random-ingress-secret;
+        proxy_set_header Authorization "";
+        proxy_set_header Cookie "";
+    }
+
+    access_log /var/log/nginx/clash-cloud.access.log combined;
+    error_log /var/log/nginx/clash-cloud.error.log warn;
 }
-
-# The opaque output token in the path is the only authorization for this route.
-# Do not pass browser admin credentials upstream.
-location ^~ /s/ {
-    auth_basic off;
-    auth_request off;
-    proxy_pass http://127.0.0.1:8080;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-Proto $scheme;
-    proxy_set_header Authorization "";
-}
-
-# Replace other server- and location-level access logs for this host so this redacted format is the only access log.
-access_log /var/log/nginx/clash-cloud.access.log clash_cloud;

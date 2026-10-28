@@ -1,0 +1,27 @@
+[Unit]
+Description=Clash Cloud HTTP host registration with local FRP server
+After=network-online.target frps.service nginx.service clash-cloud.service
+Wants=network-online.target frps.service nginx.service clash-cloud.service
+
+[Service]
+Type=simple
+User=frp-clash-cloud
+Group=frp-clash-cloud
+ExecStart=/opt/frp_0.38.0_linux_amd64/frpc -c /etc/frp/clash-cloud-frpc.ini
+Restart=on-failure
+RestartSec=5
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

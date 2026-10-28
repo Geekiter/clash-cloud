@@ -13,7 +13,7 @@ StateDirectory=clash-edge
 StateDirectoryMode=0700
 WorkingDirectory=/var/lib/clash-edge
 Environment=SAFE_PATHS=/var/lib/clash-cloud/edge
-ExecStartPre=/usr/local/bin/clash -t -f /var/lib/clash-cloud/edge/clash-edge.yaml
+ExecStartPre=/usr/local/bin/clash -d /var/lib/clash-edge -t -f /var/lib/clash-cloud/edge/clash-edge.yaml
 ExecStart=/usr/local/bin/clash -d /var/lib/clash-edge -f /var/lib/clash-cloud/edge/clash-edge.yaml
 Restart=on-failure
 RestartSec=3

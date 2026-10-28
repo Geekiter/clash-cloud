@@ -7,7 +7,7 @@ These files are templates for a later, isolated installation. They do not instal
 - /opt/clash-cloud/releases/<version>/: immutable application release, owned by root:root, mode 0755.
 - /opt/clash-cloud/current: symlink to the selected release; switch it only as part of a reviewed rollout or rollback.
 - /etc/clash-cloud/clash-cloud.env: root:clash-cloud, mode 0640; contains the encryption key and is readable only by root and the service account's group. Keep secrets out of command-line arguments and Git.
-- /var/lib/clash-cloud/: SQLite database and mutable application state, owned by clash-cloud:clash-cloud, directory mode 0700. The database file is created with owner-only mode 0600 by the service umask.
+- /var/lib/clash-cloud/: SQLite database and mutable application state, owned by clash-cloud:clash-cloud-edge, directory mode 0710. The shared edge group can traverse this parent but cannot list it; the database file remains clash-cloud-owned mode 0600. The edge subdirectory is separately owned by clash-cloud:clash-cloud-edge, mode 2750.
 - journald: service logs; do not write subscription URLs or credentials to application logs.
 
 Use a dedicated unprivileged clash-cloud user and group. The systemd unit pins CLASH_CLOUD_LISTEN to 127.0.0.1:8080 even if the environment file contains a different value. The Go service has no built-in admin authentication. Expose it only through an authenticated ingress, and protect every /api/v1/ path with the existing admin-authentication mechanism. Keep the generated subscription endpoint token separate from admin authentication.
@@ -57,8 +57,8 @@ The backend service needs the shared group as a supplementary group to create th
 The edge unit reads the generated YAML at process start, while the backend reloads the controller only after it validates and publishes a new candidate. Bootstrap the edge with a valid seed before starting the integrated backend:
 
 1. Create the clash-cloud-edge group and dedicated clash-cloud and clash-edge service accounts. Add only those accounts to the shared group.
-2. Create /var/lib/clash-cloud/edge as clash-cloud:clash-cloud-edge mode 2750. Keep the backend database and key in their separate private paths.
-3. Prepare a shadow base config from the reviewed operator base config. Set the shadow ports and controller secret below; ensure every proxy group and rule reference resolves. For an empty source set, a minimal valid seed needs at least a DIRECT proxy, a PROXY selector that points to it, and a MATCH,PROXY rule. Keep the base config root:clash-cloud mode 0640 and never use the live production ports in shadow mode.
+2. Create /var/lib/clash-cloud as clash-cloud:clash-cloud-edge mode 0710, then create /var/lib/clash-cloud/edge as clash-cloud:clash-cloud-edge mode 2750. The shared group needs execute-only traversal on the parent; keep the database file 0600 and the key in its protected environment file.
+3. Prepare a shadow base config from the reviewed operator base config. Set the shadow ports and controller secret below; ensure every proxy group and rule reference resolves. For an empty source set, a minimal valid seed uses `proxies: []`, a PROXY selector containing the built-in DIRECT entry, and a MATCH,PROXY rule. Do not define a proxy named DIRECT: the target Mihomo treats DIRECT as built-in and rejects a duplicate. Keep the base config root:clash-cloud mode 0640 and never use the live production ports in shadow mode.
 4. Install that seed as /var/lib/clash-cloud/edge/clash-edge.yaml, owned by clash-cloud:clash-cloud-edge mode 0640. The setgid edge directory preserves the group for future atomic replacements.
 5. Validate the seed using the installed binary and the same safe path:
 
@@ -85,3 +85,10 @@ The current tx edge uses ports 7890 and 9090; do not bind those while the curren
 The repository unit is named clash-edge.service to show the intended final service. Because tx already has a clash-edge.service, any shadow installation must use a separate unit name such as clash-cloud-edge-shadow.service and a separate runtime directory. Do not replace, restart, or otherwise alter the existing unit during shadow work. At cutover, first review generated output, controller reload behavior, routing, listeners, and rollback; schedule an explicit stop/rename/port handoff so two cores never bind the same proxy or controller port. Change the proxy bind address or publish route only as part of that reviewed cutover.
 
 The default unit grants no Linux capabilities and uses PrivateDevices. Keep TUN disabled for the shadow core. If a reviewed production config needs TUN or other privileged device access, define and justify a separate least-privilege capability/device policy before rollout; do not widen this example silently.
+
+
+### FRP domain ingress
+
+The tx deployment registers `clash-cloud.chenkeyan.com` as an HTTP custom domain on the existing local FRPS vhost (`127.0.0.1:8004` for clients, `127.0.0.1:8007` for Nginx). Nginx terminates TLS, protects the UI and management API with a dedicated Basic Auth file, and proxies through FRPS to a loopback-only Nginx listener on `127.0.0.1:18080`. The public Nginx vhost and loopback Nginx listener must share a random `X-Clash-Cloud-Ingress` value; the internal server returns 403 if it is absent or wrong. This prevents direct access to the FRPS HTTP port from bypassing the TLS ingress. Keep the FRPC config root-readable only by its dedicated service user and never commit the FRPS token or ingress secret.
+
+Use `nginx/clash-cloud.conf.example`, `nginx/clash-cloud-internal.conf.example`, `frp/clash-cloud-frpc.ini.example`, and `systemd/clash-cloud-frpc.service` together. Nginx must disable access logging for `/s/` in both public and internal vhosts, and the Go service redacts that path from its own access logs. The public subscription route is intentionally unauthenticated beyond its random path token; the management UI and `/api/v1/` require Basic Auth.
