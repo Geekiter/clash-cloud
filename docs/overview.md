@@ -1,41 +1,38 @@
 # Clash Cloud project overview
 
-## Background and goal
+## Goal
 
-Replace the opaque subscription-management binary in the current Mihomo edge setup with a maintainable service. Manage multiple subscription sources and merge their valid nodes into a single Mihomo configuration and subscription URL. Admin UI uses React + Material UI and avoids redundant helper copy and small-print clutter.
+Clash Cloud manages subscription sources and combines their valid nodes into one or more user-facing Clash subscription links. Users choose and switch nodes in their own Clash client. The service does not control, configure, or reload tx's Mihomo process.
 
-## Scope assumptions
+The management UI uses React + Material UI and avoids redundant helper copy and small-print clutter.
 
-- “One node” means one unified subscription/config output containing multiple individually selectable proxy nodes.
-- Input formats: Clash/Mihomo YAML with a `proxies` list, Base64-encoded YAML, and a defined subset of plain/Base64 URI feeds.
-- Initial deployment is one instance on `tx`; implementation is developed on `ac`.
-- Mihomo remains a separate process; the control plane manages sources, snapshots, rendering, and status.
-- The existing Nginx access boundary, node test/switch behavior, and MetaCubeXD access will be preserved after their exact compatibility requirements are inventoried.
+## Scope
+
+- Manage multiple subscription sources, refresh them safely, and retain each source's last valid snapshot after fetch or parse failures.
+- Accept Clash/Mihomo YAML, Base64-encoded YAML, and the supported subset of plain/Base64 URI feeds.
+- Merge enabled source nodes into one standalone Clash configuration, exposed through named links with independent tokens.
+- Keep the subscription manager isolated from proxy runtime control. No Mihomo controller, node delay test, runtime selection, base config, or edge config is part of the application.
+- Develop on `ac`; deploy the subscription-management service to `tx`. Existing tx Mihomo services remain independently managed and untouched by Clash Cloud.
 
 ## Repository layout
 
-- `backend/`: Go API, persistence, refresh scheduler, parser, config renderer.
+- `backend/`: Go API, persistence, refresh scheduler, parser, and config renderer.
 - `web/`: React + TypeScript + MUI admin UI.
-- `deploy/`: service units and deployment/rollback examples; no production changes from this directory alone.
-- `docs/`: scope, API contract, stage plans, decisions.
+- `deploy/`: deployment and ingress examples; old edge-shadow examples are historical and are not used by the subscription manager.
+- `docs/`: scope, API contract, stage plans, and decisions.
 
 ## Stages
 
 1. MVP implementation on `ac`: subscription CRUD/refresh, valid-snapshot fallback, merged output, admin UI, developer build/run docs.
-2. Mihomo integration and `tx` rollout: test against the edge core, preserve routing/UI compatibility, shadow deploy, verify output, prepare rollback, then schedule cutover.
-3. URI subscriptions: convert supported proxy URI feeds into Mihomo nodes and display sanitized format errors.
-4. Multiple unified output links: create named links with independent tokens, enable or disable each link, and preserve the existing default URL.
+2. Initial `tx` rollout and ingress setup.
+3. URI subscriptions: convert supported proxy URI feeds into Clash nodes and display sanitized format errors.
+4. Multiple unified output links: create named links with independent tokens and enable or disable each link.
+5. Subscription-only architecture: remove Mihomo controller, edge publishing, server-side delay testing, and server-side node selection.
 
 ## Stage records
 
 - Stage 1: `stage-1.md`.
-- Stage 2: `stage-2.md`.
+- Stage 2: `stage-2.md` (historical rollout record).
 - Stage 3: `stage-3.md`.
+- Stage 5: `stage-5.md`.
 - Shared API contract: `api-contract.md`.
-
-## Decisions to confirm before production cutover
-
-- Additional URI schemes required beyond the Stage 3 subset.
-- Proxy group strategy and routing rules that must match current `tx` behavior.
-- How the existing Nginx authentication and FRP/MetaCubeXD paths map to the new app.
-- Whether the initial deployment remains a single admin space or needs multiple users.

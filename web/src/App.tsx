@@ -15,7 +15,6 @@ import EditOutlined from '@mui/icons-material/EditOutlined'
 import HubOutlined from '@mui/icons-material/HubOutlined'
 import LinkRounded from '@mui/icons-material/LinkRounded'
 import MoreHorizRounded from '@mui/icons-material/MoreHorizRounded'
-import NetworkCheckRounded from '@mui/icons-material/NetworkCheckRounded'
 import SearchRounded from '@mui/icons-material/SearchRounded'
 import VisibilityRounded from '@mui/icons-material/VisibilityRounded'
 import VisibilityOffRounded from '@mui/icons-material/VisibilityOffRounded'
@@ -24,9 +23,9 @@ import LogoutRounded from '@mui/icons-material/LogoutRounded'
 
 type SubStatus = 'pending' | 'healthy' | 'degraded' | 'failed' | 'disabled' | string
 type Subscription = { id: string; name: string; enabled: boolean; refreshIntervalSeconds: number; nodeCount: number; lastAttemptAt?: string | null; lastSuccessAt?: string | null; status: SubStatus; errorCode?: string | null }
-type NodeItem = { id: string; name: string; type: string; sourceId: string; sourceName: string; latencyMs?: number | null; available?: boolean | null; selected?: boolean }
+type NodeItem = { id: string; name: string; type: string; sourceId: string; sourceName: string }
 type OutputLink = { id: string; name: string; url: string; enabled: boolean; createdAt: string }
-type OutputState = { status: string; nodeCount: number; generatedAt?: string | null; revision?: number; url?: string; links?: OutputLink[]; selectedGroup?: string }
+type OutputState = { status: string; nodeCount: number; generatedAt?: string | null; revision?: number; url?: string; links?: OutputLink[] }
 type Page = 'subscriptions' | 'nodes' | 'output'
 type Notice = { message: string; severity: 'success' | 'error' | 'info' }
 const API = '/api/v1'
@@ -66,7 +65,6 @@ export default function App() {
   const [notice, setNotice] = useState<Notice | null>(null)
   const [linkDialog, setLinkDialog] = useState<'create' | 'rename' | null>(null)
   const [activeLink, setActiveLink] = useState<OutputLink | null>(null)
-  const [testBusy, setTestBusy] = useState<string | null>(null)
   const [authReady, setAuthReady] = useState(false)
   const [authError, setAuthError] = useState('')
 
@@ -127,16 +125,6 @@ export default function App() {
   const refreshSub = (sub: Subscription) => run(`refresh:${sub.id}`, () => api(`/subscriptions/${encodeURIComponent(sub.id)}/refresh`, { method: 'POST' }), '已加入刷新队列', async () => { await load('subscriptions') })
   const toggleSub = (sub: Subscription) => run(`toggle:${sub.id}`, () => api(`/subscriptions/${encodeURIComponent(sub.id)}`, { method: 'PATCH', body: JSON.stringify({ enabled: !sub.enabled }) }), sub.enabled ? '订阅已暂停' : '订阅已启用', async () => { await load('subscriptions') })
   const deleteSub = () => activeSub && run('delete', () => api(`/subscriptions/${encodeURIComponent(activeSub.id)}`, { method: 'DELETE' }), '订阅已删除', async () => { setDialog(null); await load('subscriptions') })
-  const testNode = async (node: NodeItem) => {
-    setTestBusy(node.id)
-    try {
-      const result = await api<{ delayMs: number }>(`/nodes/${encodeURIComponent(node.id)}/delay-test`, { method: 'POST', body: JSON.stringify({ url: 'https://www.gstatic.com/generate_204', timeoutMs: 5000 }) })
-      setNotice({ message: `${result.delayMs} ms`, severity: 'success' })
-      await load('nodes')
-    } catch (error) { setNotice({ message: error instanceof Error ? error.message : '测速失败', severity: 'error' }) }
-    finally { setTestBusy(null) }
-  }
-  const selectNode = (node: NodeItem) => run(`select:${node.id}`, () => api(`/proxy-groups/PROXY/selection`, { method: 'POST', body: JSON.stringify({ name: node.name }) }), '节点已切换', async () => { await load('nodes') })
   const copyOutputLink = async (link: OutputLink) => {
     try { await navigator.clipboard.writeText(link.url); setNotice({ message: '链接已复制', severity: 'success' }) }
     catch { setNotice({ message: '复制失败', severity: 'error' }) }
@@ -163,7 +151,7 @@ export default function App() {
   if (!authReady) return <Box sx={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}><CircularProgress size={24}/></Box>
 
   return <Box className="app-shell">
-    {!mobile && <Drawer variant="permanent" className="side-drawer" PaperProps={{ className: 'drawer-paper' }}><Box className="brand"><span className="brand-mark"><WifiTetheringRounded/></span><Typography variant="subtitle1" fontWeight={750}>CLASH CLOUD</Typography></Box><Divider sx={{ borderColor: 'rgba(255,255,255,.12)' }}/>{nav}<Box className="drawer-bottom"><span className="live-dot"/> Mihomo 管理</Box></Drawer>}
+    {!mobile && <Drawer variant="permanent" className="side-drawer" PaperProps={{ className: 'drawer-paper' }}><Box className="brand"><span className="brand-mark"><WifiTetheringRounded/></span><Typography variant="subtitle1" fontWeight={750}>CLASH CLOUD</Typography></Box><Divider sx={{ borderColor: 'rgba(255,255,255,.12)' }}/>{nav}</Drawer>}
     <Box component="main" className="main-area">
       {mobile && <AppBar position="sticky" elevation={0} className="mobile-bar"><Toolbar><span className="brand-mark"><WifiTetheringRounded/></span><Typography fontWeight={750}>CLASH CLOUD</Typography></Toolbar>{nav}</AppBar>}
       <Box className="content">
@@ -199,11 +187,11 @@ export default function App() {
             <FormControl size="small" className="filter-select"><InputLabel id="source-filter">全部订阅</InputLabel><Select labelId="source-filter" label="全部订阅" value={nodeFilter} onChange={e => setNodeFilter(e.target.value)}><MenuItem value="">全部订阅</MenuItem>{subs.map(s => <MenuItem key={s.id} value={s.id}>{s.name}</MenuItem>)}</Select></FormControl>
             <Typography className="result-count">{nodeTotal} 个节点</Typography>
           </Box>
-          <Paper className="table-paper" variant="outlined"><TableContainer><Table aria-label="节点列表"><TableHead><TableRow><TableCell>节点</TableCell><TableCell>来源</TableCell><TableCell>协议</TableCell><TableCell align="right">延迟</TableCell><TableCell>状态</TableCell><TableCell align="right">操作</TableCell></TableRow></TableHead><TableBody>
-            {loading && !nodes.length ? <TableRow><TableCell colSpan={6}><LoadingRows/></TableCell></TableRow> : nodes.map(node => <TableRow key={node.id} hover>
-              <TableCell><Typography fontWeight={650}>{node.name}</Typography></TableCell><TableCell>{node.sourceName}</TableCell><TableCell><Chip size="small" label={node.type}/></TableCell><TableCell align="right" className="numeric">{node.latencyMs == null ? '—' : `${node.latencyMs} ms`}</TableCell><TableCell><Status status={node.available === false ? 'failed' : node.available === true ? 'healthy' : 'pending'}/></TableCell><TableCell align="right"><Stack direction="row" spacing={0.5} justifyContent="flex-end"><Tooltip title="测速"><span><IconButton size="small" aria-label={`测试 ${node.name}`} disabled={testBusy === node.id} onClick={() => void testNode(node)}>{testBusy === node.id ? <CircularProgress size={18}/> : <NetworkCheckRounded fontSize="small"/>}</IconButton></span></Tooltip><Button size="small" variant={node.selected ? 'outlined' : 'text'} disabled={!!node.selected || busy === `select:${node.id}`} onClick={() => void selectNode(node)}>{node.selected ? '当前使用' : '切换'}</Button></Stack></TableCell>
+          <Paper className="table-paper" variant="outlined"><TableContainer><Table aria-label="节点列表"><TableHead><TableRow><TableCell>节点</TableCell><TableCell>来源</TableCell><TableCell>协议</TableCell></TableRow></TableHead><TableBody>
+            {loading && !nodes.length ? <TableRow><TableCell colSpan={3}><LoadingRows/></TableCell></TableRow> : nodes.map(node => <TableRow key={node.id} hover>
+              <TableCell><Typography fontWeight={650}>{node.name}</Typography></TableCell><TableCell>{node.sourceName}</TableCell><TableCell><Chip size="small" label={node.type}/></TableCell>
             </TableRow>)}
-            {!loading && !nodes.length && <TableRow><TableCell colSpan={6}><Empty title="没有匹配的节点"/></TableCell></TableRow>}
+            {!loading && !nodes.length && <TableRow><TableCell colSpan={3}><Empty title="没有匹配的节点"/></TableCell></TableRow>}
           </TableBody></Table></TableContainer></Paper>
         </>}
 
@@ -253,7 +241,7 @@ function OutputPanel({ output, loading, onRefresh, onCreate, onCopy, onRename, o
   const links = output?.links || []
   return <Stack spacing={2}>
     <Paper variant="outlined" className="output-panel"><Stack direction="row" alignItems="center" justifyContent="space-between"><Box><Typography variant="h6" fontWeight={700}>统一出口</Typography><Box sx={{ mt: 1 }}><Status status={output?.status === 'healthy' ? 'healthy' : output?.nodeCount ? 'pending' : 'failed'}/></Box></Box><Stack direction="row" spacing={1}><Button onClick={onRefresh} startIcon={<AutorenewRounded/>}>刷新</Button><Button variant="contained" startIcon={<AddRounded/>} onClick={onCreate}>新建链接</Button></Stack></Stack>
-      <Box className="output-meta"><Meta label="节点数" value={String(output?.nodeCount ?? 0)}/><Meta label="配置版本" value={output?.revision ? `#${output.revision}` : '—'}/><Meta label="生成时间" value={fmtDate(output?.generatedAt)}/><Meta label="代理组" value={output?.selectedGroup || 'PROXY'}/></Box>
+      <Box className="output-meta"><Meta label="节点数" value={String(output?.nodeCount ?? 0)}/><Meta label="配置版本" value={output?.revision ? `#${output.revision}` : '—'}/><Meta label="生成时间" value={fmtDate(output?.generatedAt)}/></Box>
     </Paper>
     <Paper variant="outlined" className="table-paper"><TableContainer><Table aria-label="统一出口链接"><TableHead><TableRow><TableCell>名称</TableCell><TableCell>订阅地址</TableCell><TableCell>创建时间</TableCell><TableCell>状态</TableCell><TableCell align="right">操作</TableCell></TableRow></TableHead><TableBody>
       {loading && !links.length ? <TableRow><TableCell colSpan={5}><LoadingRows/></TableCell></TableRow> : links.map(link => <TableRow key={link.id} hover>

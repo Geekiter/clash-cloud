@@ -54,8 +54,8 @@ Keep local state outside the checkout. Use a database file with owner-only acces
 
 The generated /s/{token} URL is a bearer credential. Treat it like a password, keep it out of shell history and logs, and rotate it if exposed. GET /output returns metadata for the admin UI; it is not an admin API credential.
 
-Back up the SQLite database and CLASH_CLOUD_ENCRYPTION_KEY together. The key is required and must decode from base64 or hex to exactly 32 bytes. Edge publishing is optional: set CLASH_CLOUD_BASE_CONFIG, CLASH_CLOUD_EDGE_CONFIG, CLASH_CLOUD_MIHOMO_BIN, MIHOMO_CONTROLLER_URL, and MIHOMO_CONTROLLER_SECRET only when a local Mihomo core is configured. Keep the base config and controller settings out of frontend variables and public subscription output.
+Back up the SQLite database and CLASH_CLOUD_ENCRYPTION_KEY together. The key is required and must decode from base64 or hex to exactly 32 bytes. Clash Cloud only manages subscriptions and renders client configuration; it has no Mihomo controller or runtime configuration settings.
 
 ## Deployment boundary
 
-deploy/ contains examples for a future single-instance install. It does not change or enable services on tx. See deploy/README.md for the directory and permission layout. Production rollout requires an explicit review of the exact tx ingress, routing, and rollback plan first.
+deploy/ contains deployment and ingress examples. See deploy/README.md. The app deployment is independent of tx's Mihomo services; subscription refreshes and output generation do not control the proxy runtime.

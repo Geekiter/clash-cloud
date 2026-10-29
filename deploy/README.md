@@ -1,6 +1,6 @@
 # Deployment examples
 
-These files are templates for a later, isolated installation. They do not install, enable, or modify any service. Production rollout to tx is out of scope for Stage 1.
+Clash Cloud is deployed as a subscription-management service. It does not control tx's Mihomo. Existing Mihomo services are independent and must remain untouched by Clash Cloud deploys. The edge-shadow examples below are historical reference material only; the application no longer consumes their variables, writes their configs, or calls their controllers.
 
 ## Filesystem layout
 

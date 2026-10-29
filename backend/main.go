@@ -20,9 +20,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,9 +45,6 @@ type Node struct {
 	Type       string                 `json:"type"`
 	SourceID   string                 `json:"sourceId"`
 	SourceName string                 `json:"sourceName"`
-	LatencyMs  *int                   `json:"latencyMs,omitempty"`
-	Available  *bool                  `json:"available,omitempty"`
-	Selected   bool                   `json:"selected,omitempty"`
 	Raw        map[string]interface{} `json:"-"`
 }
 
@@ -76,12 +71,6 @@ type App struct {
 	client            *http.Client
 	refreshMu         sync.Mutex
 	refreshing        map[string]bool
-	selected          string
-	controller        string
-	controllerSecret  string
-	baseConfigPath    string
-	edgeConfigPath    string
-	mihomoBin         string
 	oauthEnabled      bool
 	oauthClientID     string
 	oauthClientSecret string
@@ -117,11 +106,6 @@ func main() {
 	}
 	a := &App{
 		db: db, cipher: aead, client: safeClient(), refreshing: map[string]bool{},
-		controller:        strings.TrimRight(os.Getenv("MIHOMO_CONTROLLER_URL"), "/"),
-		controllerSecret:  os.Getenv("MIHOMO_CONTROLLER_SECRET"),
-		baseConfigPath:    os.Getenv("CLASH_CLOUD_BASE_CONFIG"),
-		edgeConfigPath:    os.Getenv("CLASH_CLOUD_EDGE_CONFIG"),
-		mihomoBin:         os.Getenv("CLASH_CLOUD_MIHOMO_BIN"),
 		oauthEnabled:      os.Getenv("CLASH_CLOUD_OAUTH_ENABLED") == "1",
 		oauthClientID:     os.Getenv("CLASH_CLOUD_MATTERMOST_CLIENT_ID"),
 		oauthClientSecret: os.Getenv("CLASH_CLOUD_MATTERMOST_CLIENT_SECRET"),
@@ -136,9 +120,6 @@ func main() {
 		if parseErr != nil || u.Scheme != "https" || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
 			log.Fatal("CLASH_CLOUD_PUBLIC_URL must be an HTTPS origin")
 		}
-	}
-	if err := a.validateEdgeSettings(); err != nil {
-		log.Fatal("edge publishing configuration is incomplete or unsafe")
 	}
 	if err := a.ensureOutputToken(outURL); err != nil {
 		log.Fatal("cannot initialize output token")
@@ -199,7 +180,7 @@ func migrate(db *sql.DB) error {
 	public_url TEXT NOT NULL DEFAULT '',config BLOB NOT NULL DEFAULT '',generated_at TEXT,revision INTEGER NOT NULL DEFAULT 0);
 	CREATE TABLE IF NOT EXISTS output_links(id TEXT PRIMARY KEY,name TEXT NOT NULL,name_key TEXT NOT NULL UNIQUE,token_hash TEXT NOT NULL UNIQUE,
 	encrypted_token BLOB NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL);
-	CREATE TABLE IF NOT EXISTS proxy_selection(group_name TEXT PRIMARY KEY,node_name TEXT NOT NULL);`)
+`)
 	return err
 }
 func safeClient() *http.Client {
@@ -390,14 +371,6 @@ func (a *App) api(w http.ResponseWriter, r *http.Request) { // Routes are protec
 	}
 	if strings.HasPrefix(p, "/subscriptions/") {
 		a.sourceRoute(w, r, strings.TrimPrefix(p, "/subscriptions/"))
-		return
-	}
-	if strings.HasPrefix(p, "/nodes/") && strings.HasSuffix(p, "/delay-test") && r.Method == http.MethodPost {
-		a.delayTest(w, r)
-		return
-	}
-	if strings.HasPrefix(p, "/proxy-groups/") && strings.HasSuffix(p, "/selection") && r.Method == http.MethodPost {
-		a.selectProxy(w, r)
 		return
 	}
 	apiError(w, 404, "not_found", "Not found")
@@ -863,7 +836,6 @@ func (a *App) listNodes(w http.ResponseWriter, r *http.Request) {
 		if q != "" && !strings.Contains(strings.ToLower(n.Name), q) && !strings.Contains(strings.ToLower(n.Type), q) && !strings.Contains(strings.ToLower(n.SourceName), q) {
 			continue
 		}
-		n.Selected = n.Name == a.currentSelection("PROXY")
 		filtered = append(filtered, n)
 	}
 	total := len(filtered)
@@ -954,7 +926,7 @@ func (a *App) outputInfo(w http.ResponseWriter) {
 			break
 		}
 	}
-	jsonResponse(w, 200, map[string]interface{}{"status": status, "nodeCount": len(nodes), "generatedAt": gt, "revision": rev, "url": legacyURL, "links": links, "selectedGroup": "PROXY"})
+	jsonResponse(w, 200, map[string]interface{}{"status": status, "nodeCount": len(nodes), "generatedAt": gt, "revision": rev, "url": legacyURL, "links": links})
 }
 
 func validOutputLinkName(name string) (string, string, bool) {
@@ -1165,117 +1137,6 @@ func (a *App) subscription(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(200)
 	_, _ = w.Write(config)
 }
-func (a *App) delayTest(w http.ResponseWriter, r *http.Request) {
-	var in struct {
-		URL     string `json:"url"`
-		Timeout int    `json:"timeoutMs"`
-	}
-	if !decode(w, r, &in) {
-		return
-	}
-	if in.Timeout < 1 || in.Timeout > 30000 {
-		in.Timeout = 5000
-	}
-	if a.controller == "" {
-		apiError(w, 503, "mihomo_unavailable", "Delay testing requires a Mihomo controller")
-		return
-	}
-	id := strings.TrimPrefix(r.URL.Path, "/api/v1/nodes/")
-	id = strings.TrimSuffix(id, "/delay-test")
-	var node *Node
-	nodes, _ := a.allNodes(true)
-	for i := range nodes {
-		if nodes[i].ID == id {
-			node = &nodes[i]
-			break
-		}
-	}
-	if node == nil {
-		apiError(w, 404, "not_found", "Node not found")
-		return
-	}
-	endpoint := a.controller + "/proxies/" + url.PathEscape(node.Name) + "/delay?url=" + url.QueryEscape(in.URL) + "&timeout=" + strconv.Itoa(in.Timeout)
-	req, _ := http.NewRequest("GET", endpoint, nil)
-	a.controllerAuth(req)
-	resp, e := http.DefaultClient.Do(req)
-	if e != nil {
-		apiError(w, 502, "mihomo_error", "Delay test failed")
-		return
-	}
-	defer resp.Body.Close()
-	var out struct {
-		Delay int `json:"delay"`
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 || json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&out) != nil {
-		apiError(w, 502, "mihomo_error", "Delay test failed")
-		return
-	}
-	jsonResponse(w, 200, map[string]int{"delayMs": out.Delay})
-}
-func (a *App) selectProxy(w http.ResponseWriter, r *http.Request) {
-	var in struct {
-		Name string `json:"name"`
-	}
-	if !decode(w, r, &in) {
-		return
-	}
-	group := strings.TrimPrefix(r.URL.Path, "/api/v1/proxy-groups/")
-	group = strings.TrimSuffix(group, "/selection")
-	if group == "" || len(group) > 100 || in.Name == "" {
-		apiError(w, 400, "invalid_selection", "Group and node are required")
-		return
-	}
-	if a.controller != "" {
-		body, _ := json.Marshal(map[string]string{"name": in.Name})
-		req, _ := http.NewRequest("PUT", a.controller+"/proxies/"+url.PathEscape(group), strings.NewReader(string(body)))
-		req.Header.Set("Content-Type", "application/json")
-		a.controllerAuth(req)
-		resp, e := http.DefaultClient.Do(req)
-		if e != nil {
-			apiError(w, 502, "mihomo_error", "Could not change proxy selection")
-			return
-		}
-		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		resp.Body.Close()
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			apiError(w, 502, "mihomo_error", "Could not change proxy selection")
-			return
-		}
-	} else {
-		nodes, e := a.allNodes(false)
-		if e != nil {
-			internal(w)
-			return
-		}
-		found := in.Name == "DIRECT"
-		for _, n := range nodes {
-			if n.Name == in.Name {
-				found = true
-				break
-			}
-		}
-		if !found {
-			apiError(w, 404, "not_found", "Proxy not found")
-			return
-		}
-	}
-	_, e := a.db.Exec(`INSERT INTO proxy_selection(group_name,node_name) VALUES(?,?) ON CONFLICT(group_name) DO UPDATE SET node_name=excluded.node_name`, group, in.Name)
-	if e != nil {
-		internal(w)
-		return
-	}
-	w.WriteHeader(204)
-}
-func (a *App) controllerAuth(r *http.Request) {
-	if a.controllerSecret != "" {
-		r.Header.Set("Authorization", "Bearer "+a.controllerSecret)
-	}
-}
-func (a *App) currentSelection(group string) string {
-	var n string
-	_ = a.db.QueryRow(`SELECT node_name FROM proxy_selection WHERE group_name=?`, group).Scan(&n)
-	return n
-}
 func (a *App) exists(id string) bool {
 	var n int
 	return a.db.QueryRow(`SELECT count(*) FROM subscriptions WHERE id=?`, id).Scan(&n) == nil && n > 0
@@ -1311,11 +1172,7 @@ func (a *App) allNodes(enabledOnly bool) ([]Node, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	reserved, err := a.baseConfigNames()
-	if err != nil {
-		return nil, err
-	}
-	used := reserved
+	used := map[string]bool{}
 	for i := range out {
 		name := out[i].Name
 		if used[name] {
@@ -1568,309 +1425,13 @@ func nodesFromProxyMaps(proxies []map[string]interface{}, sourceID, sourceName s
 	return out, nil
 }
 
-func (a *App) edgeConfigured() bool {
-	return a.baseConfigPath != "" || a.edgeConfigPath != "" || a.mihomoBin != ""
-}
-
-func (a *App) validateEdgeSettings() error {
-	if !a.edgeConfigured() {
-		return nil
-	}
-	if a.baseConfigPath == "" || a.edgeConfigPath == "" || a.mihomoBin == "" || a.controller == "" || a.controllerSecret == "" {
-		return errors.New("incomplete edge publishing configuration")
-	}
-	for _, p := range []string{a.baseConfigPath, a.edgeConfigPath} {
-		if !filepath.IsAbs(p) {
-			return errors.New("edge config paths must be absolute")
-		}
-	}
-	if filepath.Clean(a.baseConfigPath) == filepath.Clean(a.edgeConfigPath) {
-		return errors.New("base and generated config paths must differ")
-	}
-	baseInfo, err := os.Lstat(a.baseConfigPath)
-	if err != nil || !baseInfo.Mode().IsRegular() {
-		return errors.New("base config must be a regular file")
-	}
-	edgeDir := filepath.Dir(a.edgeConfigPath)
-	dirInfo, err := os.Lstat(edgeDir)
-	if err != nil || !dirInfo.IsDir() || dirInfo.Mode()&os.ModeSymlink != 0 {
-		return errors.New("generated config directory must already exist and be a real directory")
-	}
-	if info, err := os.Lstat(a.edgeConfigPath); err == nil && !info.Mode().IsRegular() {
-		return errors.New("generated config must be a regular file")
-	} else if err != nil && !os.IsNotExist(err) {
-		return errors.New("cannot inspect generated config")
-	}
-	if !filepath.IsAbs(a.mihomoBin) {
-		return errors.New("Mihomo executable path must be absolute")
-	}
-	binInfo, err := os.Stat(a.mihomoBin)
-	if err != nil || !binInfo.Mode().IsRegular() || binInfo.Mode()&0111 == 0 {
-		return errors.New("Mihomo executable is unavailable")
-	}
-	controllerURL, err := url.Parse(a.controller)
-	if err != nil || controllerURL.Scheme != "http" || controllerURL.User != nil {
-		return errors.New("Mihomo controller must be local HTTP")
-	}
-	controllerIP := net.ParseIP(controllerURL.Hostname())
-	if controllerIP == nil || !controllerIP.IsLoopback() || controllerURL.Port() == "" {
-		return errors.New("Mihomo controller must use an explicit loopback address and port")
-	}
-	if _, err := os.ReadFile(a.baseConfigPath); err != nil {
-		return errors.New("cannot read base config")
-	}
-	return nil
-}
-
-func (a *App) baseConfigNames() (map[string]bool, error) {
-	reserved := map[string]bool{}
-	if !a.edgeConfigured() {
-		return reserved, nil
-	}
-	data, err := os.ReadFile(a.baseConfigPath)
-	if err != nil {
-		return nil, errors.New("cannot read edge base config")
-	}
-	var cfg map[string]interface{}
-	if err := yaml.Unmarshal(data, &cfg); err != nil || cfg == nil {
-		return nil, errors.New("invalid edge base config")
-	}
-	if list, ok := cfg["proxies"].([]interface{}); ok {
-		for _, item := range list {
-			if proxy, ok := item.(map[string]interface{}); ok {
-				if name, ok := proxy["name"].(string); ok && name != "" {
-					reserved[name] = true
-				}
-			}
-		}
-	}
-	if list, ok := cfg["proxy-groups"].([]interface{}); ok {
-		for _, item := range list {
-			if group, ok := item.(map[string]interface{}); ok {
-				if name, ok := group["name"].(string); ok && name != "" {
-					reserved[name] = true
-				}
-			}
-		}
-	}
-	return reserved, nil
-}
-
-func buildEdgeConfig(base []byte, nodes []Node) ([]byte, error) {
-	var cfg map[string]interface{}
-	if err := yaml.Unmarshal(base, &cfg); err != nil || cfg == nil {
-		return nil, errors.New("invalid edge base config")
-	}
-	proxies, ok := cfg["proxies"].([]interface{})
-	if !ok && cfg["proxies"] != nil {
-		return nil, errors.New("invalid base proxies")
-	}
-	if proxies == nil {
-		proxies = []interface{}{}
-	}
-	members := []string{}
-	seenMembers := map[string]bool{}
-	addMember := func(name string) {
-		if name != "" && !seenMembers[name] {
-			seenMembers[name] = true
-			members = append(members, name)
-		}
-	}
-	for _, item := range proxies {
-		if proxy, ok := item.(map[string]interface{}); ok {
-			if name, ok := proxy["name"].(string); ok {
-				addMember(name)
-			}
-		}
-	}
-	for _, node := range nodes {
-		if node.Raw == nil {
-			continue
-		}
-		proxies = append(proxies, node.Raw)
-		addMember(node.Name)
-	}
-	groups, ok := cfg["proxy-groups"].([]interface{})
-	if !ok && cfg["proxy-groups"] != nil {
-		return nil, errors.New("invalid base proxy groups")
-	}
-	outGroups := make([]interface{}, 0, len(groups)+1)
-	foundProxyGroup := false
-	for _, item := range groups {
-		group, ok := item.(map[string]interface{})
-		if !ok {
-			return nil, errors.New("invalid base proxy group")
-		}
-		name, _ := group["name"].(string)
-		if name != "PROXY" {
-			outGroups = append(outGroups, item)
-			continue
-		}
-		if foundProxyGroup {
-			return nil, errors.New("duplicate reserved PROXY group")
-		}
-		foundProxyGroup = true
-		if oldMembers, ok := group["proxies"].([]interface{}); ok {
-			for _, value := range oldMembers {
-				if name, ok := value.(string); ok {
-					addMember(name)
-				}
-			}
-		}
-		addMember("DIRECT")
-		group["name"] = "PROXY"
-		group["type"] = "select"
-		group["proxies"] = append([]string(nil), members...)
-		outGroups = append(outGroups, group)
-	}
-	if !foundProxyGroup {
-		addMember("DIRECT")
-		outGroups = append(outGroups, map[string]interface{}{"name": "PROXY", "type": "select", "proxies": append([]string(nil), members...)})
-	}
-	cfg["proxies"] = proxies
-	cfg["proxy-groups"] = outGroups
-	return yaml.Marshal(cfg)
-}
-
-func atomicWrite(path string, data []byte, mode os.FileMode) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), ".clash-cloud-*.yaml")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	ok := false
-	defer func() {
-		tmp.Close()
-		if !ok {
-			os.Remove(tmpName)
-		}
-	}()
-	if err := tmp.Chmod(mode); err != nil {
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return err
-	}
-	if dir, err := os.Open(filepath.Dir(path)); err == nil {
-		_ = dir.Sync()
-		_ = dir.Close()
-	}
-	ok = true
-	return nil
-}
-
-func (a *App) reloadCore() error {
-	body := strings.NewReader(`{"path":"","payload":""}`)
-	req, err := http.NewRequest(http.MethodPut, a.controller+"/configs?force=true", body)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	a.controllerAuth(req)
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("controller rejected reload")
-	}
-	return nil
-}
-
-func (a *App) publishEdge(candidate []byte) (func(), error) {
-	if !a.edgeConfigured() {
-		return func() {}, nil
-	}
-	tmp, err := os.CreateTemp(filepath.Dir(a.edgeConfigPath), ".clash-cloud-check-*.yaml")
-	if err != nil {
-		return nil, errors.New("cannot create edge candidate")
-	}
-	tmpPath := tmp.Name()
-	cleanup := func() { _ = os.Remove(tmpPath) }
-	if err := tmp.Chmod(0640); err != nil {
-		tmp.Close()
-		cleanup()
-		return nil, errors.New("cannot set edge candidate permissions")
-	}
-	if _, err := tmp.Write(candidate); err != nil {
-		tmp.Close()
-		cleanup()
-		return nil, errors.New("cannot write edge candidate")
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		cleanup()
-		return nil, errors.New("cannot sync edge candidate")
-	}
-	if err := tmp.Close(); err != nil {
-		cleanup()
-		return nil, errors.New("cannot close edge candidate")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, a.mihomoBin, "-t", "-f", tmpPath)
-	if _, err := cmd.CombinedOutput(); err != nil {
-		cleanup()
-		return nil, errors.New("Mihomo rejected edge candidate")
-	}
-	cleanup()
-
-	var old []byte
-	var oldMode os.FileMode = 0640
-	oldInfo, err := os.Lstat(a.edgeConfigPath)
-	oldExists := err == nil
-	if oldExists {
-		if !oldInfo.Mode().IsRegular() {
-			return nil, errors.New("edge target is not a regular file")
-		}
-		oldMode = oldInfo.Mode().Perm()
-		old, err = os.ReadFile(a.edgeConfigPath)
-		if err != nil {
-			return nil, errors.New("cannot read current edge config")
-		}
-	} else if !os.IsNotExist(err) {
-		return nil, errors.New("cannot inspect current edge config")
-	}
-	if oldExists && bytes.Equal(old, candidate) {
-		return func() {}, nil
-	}
-	restore := func() {
-		if oldExists {
-			_ = atomicWrite(a.edgeConfigPath, old, oldMode)
-		} else {
-			_ = os.Remove(a.edgeConfigPath)
-		}
-		_ = a.reloadCore()
-	}
-	if err := atomicWrite(a.edgeConfigPath, candidate, 0640); err != nil {
-		return nil, errors.New("cannot atomically publish edge config")
-	}
-	if err := a.reloadCore(); err != nil {
-		restore()
-		return nil, errors.New("Mihomo reload failed; previous edge config restored")
-	}
-	return restore, nil
-}
-
 func (a *App) regenerate() error {
 	nodes, err := a.allNodes(true)
 	if err != nil {
 		return err
 	}
 	proxies := make([]map[string]interface{}, 0, len(nodes))
-	names := []string{}
+	names := make([]string, 0, len(nodes))
 	for _, node := range nodes {
 		if node.Raw != nil {
 			proxies = append(proxies, node.Raw)
@@ -1883,32 +1444,13 @@ func (a *App) regenerate() error {
 	if err != nil {
 		return err
 	}
-	var edgeConfig []byte
-	if a.edgeConfigured() {
-		base, err := os.ReadFile(a.baseConfigPath)
-		if err != nil {
-			return errors.New("cannot read edge base config")
-		}
-		edgeConfig, err = buildEdgeConfig(base, nodes)
-		if err != nil {
-			return err
-		}
-	}
-	rollback, err := a.publishEdge(edgeConfig)
-	if err != nil {
-		return err
-	}
 	var old []byte
 	_ = a.db.QueryRow(`SELECT config FROM output_settings WHERE id=1`).Scan(&old)
 	if bytes.Equal(old, publicConfig) {
 		return nil
 	}
 	_, err = a.db.Exec(`UPDATE output_settings SET config=?,generated_at=?,revision=revision+1 WHERE id=1`, publicConfig, stamp(time.Now().UTC()))
-	if err != nil {
-		rollback()
-		return err
-	}
-	return nil
+	return err
 }
 
 func stamp(t time.Time) string { return t.UTC().Format(time.RFC3339Nano) }

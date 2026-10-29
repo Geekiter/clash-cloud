@@ -1,6 +1,6 @@
 # Clash Cloud backend (MVP)
 
-A single-process Go control plane for subscription CRUD, guarded fetching, last-good snapshots, merged Mihomo YAML output, and the documented `/api/v1` endpoints. It uses SQLite and AES-GCM encryption for source URLs and output-link tokens. Build artifacts and runtime state are not stored in this directory.
+A single-process Go service for subscription CRUD, guarded fetching, last-good snapshots, and merged Clash/Mihomo YAML subscription output. It uses SQLite and AES-GCM encryption for source URLs and output-link tokens. Build artifacts and runtime state are not stored in this directory.
 
 ## Build and run
 
@@ -31,21 +31,11 @@ The management UI and API use Mattermost OAuth when `CLASH_CLOUD_OAUTH_ENABLED=1
 - `CLASH_CLOUD_MATTERMOST_CLIENT_ID`, `CLASH_CLOUD_MATTERMOST_CLIENT_SECRET`: confidential OAuth application credentials registered in Mattermost. Keep the secret out of Git.
 - `CLASH_CLOUD_OAUTH_SESSION_KEY`: independent base64 or hex key with at least 32 bytes of entropy used to sign browser sessions.
 - `CLASH_CLOUD_VERSION`: optional health response version.
-- `MIHOMO_CONTROLLER_URL`, `MIHOMO_CONTROLLER_SECRET`: controller integration for delay testing and proxy selection. When edge publishing is enabled, both are required and the URL must be an explicit loopback HTTP address and port.
-- `CLASH_CLOUD_BASE_CONFIG`: absolute path to an operator-maintained Mihomo YAML file. Its ports, DNS, rules, listeners, and other settings are preserved by the edge renderer.
-- `CLASH_CLOUD_EDGE_CONFIG`: absolute path Mihomo reads as its active config. The backend writes mode `0640` using a same-directory temporary file and atomic rename, then reloads through the controller. Its parent directory must exist and be writable by the service; use a setgid directory to supply the Mihomo reader group.
-- `CLASH_CLOUD_MIHOMO_BIN`: absolute path to the Mihomo executable used for candidate validation (`mihomo -t -f <candidate>`).
-
-Set all three edge variables together to enable production publishing; leave all three unset for development mode, which serves only the standalone unified subscription YAML. Edge mode also requires the loopback controller URL and secret. Seed the generated edge path with a valid base config before starting Mihomo, since its service needs a config file at startup. Mihomo's `SAFE_PATHS` must allow the edge directory so temporary validation candidates can be checked.
-
 ## MVP limitations
 
 - Accepts Clash/Mihomo YAML, standard/raw Base64-encoded YAML containing a `proxies` list, and plaintext or Base64-encoded URI lists using `ss://`, `vmess://`, `vless://`, `trojan://`, `hysteria2://`, or `hy2://`. This is a defined scheme subset, not full Mihomo-link compatibility. It maps common TLS, WebSocket, HTTP/H2, gRPC, ALPN, SNI, Reality, and selected Shadowsocks plugin fields. VLESS accepts `encryption=none`; VMess, VLESS, and Trojan transport support is protocol-specific. `ssr://`, provider-specific encrypted formats, and unrecognized transport/plugin/encryption options are not supported.
 - URI input is parsed as one strict format at a time, with an explicit scheme allowlist and byte, line, and node limits. A clearly unsupported URI scheme reports `unsupported_format`; malformed links or YAML report `invalid_subscription`. Errors never include source text or credentials.
 - Subscription fetches send `User-Agent: clash.meta` by default because some providers negotiate the response format by client identity. Fetch protection rejects non-public DNS answers and rechecks them at connection time, limits redirects, response size, and request time. Provider-specific authentication headers and custom CA bundles are not supported.
-- The public `/s/{token}` output remains a standalone conservative config with a `PROXY` selector and `MATCH,PROXY`; it does not expose the operator base config, controller secret, or local API settings.
-- Optional edge publishing reads the operator base config, appends subscription proxies, and replaces the reserved `PROXY` group's members while preserving other base config keys, proxies, and groups. It validates the candidate with Mihomo before atomic replacement and requires a successful controller reload. On failure it restores the previous file and keeps the previous public output.
-- The edge renderer treats `PROXY` as a reserved Clash Cloud group. The base config must not use it for unrelated operator policy. It does not perform a full compatibility audit of every operator group/provider reference.
+- The public `/s/{token}` output is a standalone config with a `PROXY` selector and `MATCH,PROXY`. It contains the merged subscription nodes; node selection and runtime behavior belong to the user's Clash client. Clash Cloud does not read, write, validate, or reload any Mihomo runtime config.
 - API management authentication is expected from the local trusted ingress. There are no user accounts, refresh history table, rate limiting, or encrypted node snapshots.
-- The optional controller integration is only for delay test/selection. When no controller is configured, delay tests return `mihomo_unavailable`; selection is recorded for UI indication but does not change the generated selector's runtime state.
-- With no enabled subscription nodes, the public output becomes a valid `DIRECT`-only `PROXY` config and status is `no_nodes`; the edge renderer removes subscription nodes while retaining operator base proxies and other groups.
+- With no enabled subscription nodes, the public output becomes a valid `DIRECT`-only `PROXY` config and status is `no_nodes`.
