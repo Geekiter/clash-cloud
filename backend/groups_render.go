@@ -18,7 +18,7 @@ var (
 
 // buildManagedConfig renders the client-facing unified profile. It consumes
 // only the supplied enabled-node snapshot and never contacts a controller.
-func buildManagedConfig(nodes []Node, groups []ManagedGroup) ([]byte, error) {
+func buildManagedConfig(nodes []Node, groups []ManagedGroup, direct DirectRoutingSettings) ([]byte, error) {
 	proxies := make([]interface{}, 0, len(nodes))
 	proxyNames := make(map[string]bool, len(nodes))
 	nodeNames := make(map[string]string, len(nodes)) // merged-node ID -> proxy name
@@ -130,7 +130,7 @@ func buildManagedConfig(nodes []Node, groups []ManagedGroup) ([]byte, error) {
 		groupByID[group.ID] = group.Name
 	}
 
-	rules := make([]string, 0, len(groups)*2+1)
+	rules := make([]string, 0, len(groups)*2+len(direct.Domains)+3)
 	for i, group := range groups {
 		if i == generalIndex || group.ID == "general" {
 			continue
@@ -145,6 +145,18 @@ func buildManagedConfig(nodes []Node, groups []ManagedGroup) ([]byte, error) {
 				rules = append(rules, line)
 			}
 		}
+	}
+
+	for _, domain := range direct.Domains {
+		if normalized, ok := normalizeDirectRoutingSettings(DirectRoutingSettings{Domains: []string{domain}}); ok && len(normalized.Domains) == 1 {
+			rules = append(rules, "DOMAIN-SUFFIX,"+normalized.Domains[0]+",DIRECT")
+		}
+	}
+	if direct.ChinaDomainDirect {
+		rules = append(rules, "GEOSITE,CN,DIRECT")
+	}
+	if direct.ChinaIPDirect {
+		rules = append(rules, "GEOIP,CN,DIRECT")
 	}
 
 	// Only the reserved built-in ID owns the catch-all route. This prevents a

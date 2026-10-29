@@ -11,7 +11,8 @@
 - Clash Cloud stores group policy and emits client-side proxy groups and ordered domain rules. It does not issue runtime health checks or manage tx Mihomo.
 - Service groups default to independent `url-test` groups with a 180-second interval and all enabled nodes as candidates.
 - Google-US combines Google and YouTube domain rules and uses manually selected node membership so region eligibility is explicit. Region groups 美欧 and 亚洲 also use explicit membership and have no domain rules by default.
-- The generic group is the final `MATCH` route.
+- Mainland domain and IP traffic defaults to direct. Custom domain suffixes can also be routed direct.
+- The generic group is the final `MATCH` route after service and direct rules.
 - Group rules use `GEOSITE` references by default and allow additional domain suffix rules.
 - Candidate probing does not guarantee all app endpoints/accounts/features work. Each group has a configurable probe URL and expected status.
 
@@ -31,7 +32,9 @@
 - [x] 美欧 and 亚洲 have no domain routes by default; domain rules can be added later without changing the `MATCH` route.
 - [x] Disabled subscription nodes are absent from every rendered group.
 - [x] Group health-check interval defaults to 180 seconds and is emitted for client-side Mihomo execution.
-- [x] Generated rules are ordered before `MATCH`; the output contains no management credentials or subscription URLs.
+- [x] Service proxy routes precede custom and mainland direct routes; all routes precede `MATCH`.
+- [x] Direct rule settings persist and regenerate the public unified YAML without Mihomo control.
+- [x] The output contains no management credentials or subscription URLs.
 - [x] UI follows existing React/MUI patterns and avoids helper copy or small-print descriptions.
 
 ## Actual record

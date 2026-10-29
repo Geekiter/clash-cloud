@@ -129,6 +129,9 @@ func main() {
 	if err := a.ensureManagedGroups(); err != nil {
 		log.Fatal("cannot initialize managed groups")
 	}
+	if err := a.ensureDirectRoutingSettings(); err != nil {
+		log.Fatal("cannot initialize direct routing settings")
+	}
 	if err := a.regenerate(); err != nil {
 		log.Fatal("cannot initialize unified output")
 	}
@@ -190,6 +193,7 @@ func migrate(db *sql.DB) error {
 	encrypted_token BLOB NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL);
 	CREATE TABLE IF NOT EXISTS node_settings(node_id TEXT PRIMARY KEY,enabled INTEGER NOT NULL DEFAULT 1);
 	CREATE TABLE IF NOT EXISTS managed_groups(id TEXT PRIMARY KEY,position INTEGER NOT NULL,config_json BLOB NOT NULL);
+	CREATE TABLE IF NOT EXISTS direct_routing_settings(id INTEGER PRIMARY KEY CHECK(id=1),config_json BLOB NOT NULL);
 `)
 	return err
 }
@@ -339,6 +343,17 @@ func (a *App) api(w http.ResponseWriter, r *http.Request) { // Routes are protec
 			apiError(w, http.StatusUnauthorized, "unauthorized", "Sign in required")
 			return
 		}
+	}
+	if p == "/direct-routing" {
+		switch r.Method {
+		case http.MethodGet:
+			a.getDirectRoutingSettings(w)
+		case http.MethodPatch:
+			a.patchDirectRoutingSettings(w, r)
+		default:
+			method(w)
+		}
+		return
 	}
 	if p == "/subscriptions" {
 		switch r.Method {
@@ -1620,7 +1635,11 @@ func (a *App) regenerateManagedGroupsLocked() error {
 	if err != nil {
 		return err
 	}
-	publicConfig, err := buildManagedConfig(nodes, groups)
+	directSettings, err := a.loadDirectRoutingSettings()
+	if err != nil {
+		return err
+	}
+	publicConfig, err := buildManagedConfig(nodes, groups, directSettings)
 	if err != nil {
 		return err
 	}

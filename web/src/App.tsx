@@ -29,6 +29,7 @@ type OutputLink = { id: string; name: string; url: string; enabled: boolean; cre
 type GroupRule = { type: 'geosite' | 'domain-suffix'; value: string }
 type RouteGroup = { id: string; name: string; enabled: boolean; rules: GroupRule[]; nodeMode: 'all_enabled' | 'selected'; nodeIds: string[]; strategy: 'url-test' | string; testUrl: string; intervalSeconds: number; timeoutMs: number; expectedStatus: string; lazy: boolean; builtIn: boolean }
 type GroupInput = Omit<RouteGroup, 'id' | 'builtIn'>
+type DirectRoutingSettings = { chinaDomainDirect: boolean; chinaIPDirect: boolean; domains: string[] }
 type OutputState = { status: string; nodeCount: number; generatedAt?: string | null; revision?: number; url?: string; links?: OutputLink[] }
 type Page = 'subscriptions' | 'nodes' | 'output' | 'groups'
 type Notice = { message: string; severity: 'success' | 'error' | 'info' }
@@ -74,6 +75,8 @@ export default function App() {
   const [nodes, setNodes] = useState<NodeItem[]>([])
   const [nodeTotal, setNodeTotal] = useState(0)
   const [groups, setGroups] = useState<RouteGroup[]>([])
+  const [directSettings, setDirectSettings] = useState<DirectRoutingSettings | null>(null)
+  const [directDomainsText, setDirectDomainsText] = useState('')
   const [groupDialog, setGroupDialog] = useState<'create' | 'edit' | 'delete' | null>(null)
   const [activeGroup, setActiveGroup] = useState<RouteGroup | null>(null)
   const [output, setOutput] = useState<OutputState | null>(null)
@@ -112,11 +115,14 @@ export default function App() {
         const sources = await api<{ items: Subscription[]; total: number }>('/subscriptions')
         setSubs(sources.items)
       } else if (target === 'groups') {
-        const [groupData, nodeData] = await Promise.all([
+        const [groupData, nodeData, directData] = await Promise.all([
           api<{ items: RouteGroup[]; total: number }>('/groups'), fetchAllNodes(),
+          api<{ settings: DirectRoutingSettings }>('/direct-routing'),
         ])
         setGroups(groupData.items)
         setNodes(nodeData.items); setNodeTotal(nodeData.total)
+        setDirectSettings(directData.settings)
+        setDirectDomainsText(directData.settings.domains.join('\n'))
       } else {
         const data = await api<OutputState>('/output')
         setOutput(data)
@@ -170,6 +176,12 @@ export default function App() {
     await api(`/groups/${encodeURIComponent(activeGroup.id)}`, { method: 'DELETE' })
     setGroups(current => current.filter(group => group.id !== activeGroup.id))
   }, '策略组已删除', () => { setGroupDialog(null); setActiveGroup(null) })
+  const updateDirectSettings = (patch: Partial<DirectRoutingSettings>, success = '直连规则已保存') => run('direct-routing', async () => {
+    const result = await api<{ settings: DirectRoutingSettings }>('/direct-routing', { method: 'PATCH', body: JSON.stringify(patch) })
+    setDirectSettings(result.settings)
+    setDirectDomainsText(result.settings.domains.join('\n'))
+  }, success)
+  const saveDirectDomains = () => updateDirectSettings({ domains: directDomainsText.split(/\r?\n/).map(domain => domain.trim()).filter(Boolean) })
   const copyOutputLink = async (link: OutputLink) => {
     try { await navigator.clipboard.writeText(link.url); setNotice({ message: '链接已复制', severity: 'success' }) }
     catch { setNotice({ message: '复制失败', severity: 'error' }) }
@@ -240,7 +252,10 @@ export default function App() {
           </TableBody></Table></TableContainer></Paper>
         </>}
 
-        {page === 'groups' && <GroupTable groups={groups} nodes={nodes} loading={loading} busy={busy} onToggle={toggleGroup} onEdit={group => { setActiveGroup(group); setGroupDialog('edit') }} onDelete={group => { setActiveGroup(group); setGroupDialog('delete') }}/>}
+        {page === 'groups' && <Stack spacing={2}>
+          {directSettings && <DirectRoutingPanel settings={directSettings} domainsText={directDomainsText} busy={busy === 'direct-routing'} onDomainsChange={setDirectDomainsText} onToggleDomain={() => void updateDirectSettings({ chinaDomainDirect: !directSettings.chinaDomainDirect })} onToggleIP={() => void updateDirectSettings({ chinaIPDirect: !directSettings.chinaIPDirect })} onSaveDomains={saveDirectDomains}/>}
+          <GroupTable groups={groups} nodes={nodes} loading={loading} busy={busy} onToggle={toggleGroup} onEdit={group => { setActiveGroup(group); setGroupDialog('edit') }} onDelete={group => { setActiveGroup(group); setGroupDialog('delete') }}/>
+        </Stack>}
         {page === 'output' && <OutputPanel output={output} loading={loading} onRefresh={() => void load('output')} onCreate={() => { setActiveLink(null); setLinkDialog('create') }} onCopy={link => void copyOutputLink(link)} onRename={link => { setActiveLink(link); setLinkDialog('rename') }} onToggle={link => void toggleOutputLink(link)} busy={busy}/>}
       </Box>
     </Box>
@@ -282,6 +297,22 @@ function SubscriptionDialog({ open, mode, sub, busy, onClose, onSave }: { open: 
 function emptyGroup(): GroupInput {
   return { name: '', enabled: true, rules: [], nodeMode: 'all_enabled', nodeIds: [], strategy: 'url-test', testUrl: 'https://www.gstatic.com/generate_204', intervalSeconds: 180, timeoutMs: 5000, expectedStatus: '204', lazy: false }
 }
+function DirectRoutingPanel({ settings, domainsText, busy, onDomainsChange, onToggleDomain, onToggleIP, onSaveDomains }: { settings: DirectRoutingSettings; domainsText: string; busy: boolean; onDomainsChange: (value: string) => void; onToggleDomain: () => void; onToggleIP: () => void; onSaveDomains: () => void }) {
+  return <Paper variant="outlined" sx={{ p: 2.25, borderColor: 'divider' }}>
+    <Stack spacing={2}>
+      <Typography fontWeight={700}>直连规则</Typography>
+      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5}>
+        <Stack direction="row" alignItems="center" justifyContent="space-between" className="group-enable" sx={{ flex: 1 }}><Typography>大陆域名直连</Typography><Switch size="small" checked={settings.chinaDomainDirect} disabled={busy} onChange={onToggleDomain}/></Stack>
+        <Stack direction="row" alignItems="center" justifyContent="space-between" className="group-enable" sx={{ flex: 1 }}><Typography>大陆 IP 直连</Typography><Switch size="small" checked={settings.chinaIPDirect} disabled={busy} onChange={onToggleIP}/></Stack>
+      </Stack>
+      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} alignItems={{ sm: 'flex-start' }}>
+        <TextField fullWidth multiline minRows={2} label="指定域名直连" placeholder="example.cn" value={domainsText} onChange={event => onDomainsChange(event.target.value)}/>
+        <Button variant="contained" disabled={busy} onClick={onSaveDomains} sx={{ minWidth: 140 }}>保存直连规则</Button>
+      </Stack>
+    </Stack>
+  </Paper>
+}
+
 function selectedEnabledCount(group: RouteGroup, nodes: NodeItem[]) {
   if (group.nodeMode === 'all_enabled') return nodes.filter(node => node.enabled).length
   const ids = new Set(group.nodeIds || [])

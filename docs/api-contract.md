@@ -37,6 +37,13 @@ Statuses: `pending`, `healthy`, `degraded`, `failed`, `disabled`. The current im
 - `all_enabled` membership includes enabled subscription snapshots and node-enabled nodes. `selected` membership uses `nodeIds` from `GET /nodes`; disabled subscriptions and individually disabled nodes never enter output. Selected groups with no currently usable members and their rules are omitted until members are available. With no usable proxies, output is direct-only with `MATCH,DIRECT`.
 - Group changes persist and regenerate the public unified YAML atomically. They do not control or reload the Mihomo core.
 
+## Direct routing
+
+- `GET /direct-routing` → `{settings:{chinaDomainDirect,chinaIPDirect,domains}}`.
+- `PATCH /direct-routing` accepts any subset of those fields and returns `{settings}`. `domains` is a list of up to 100 domain suffixes; values are lowercased, deduplicated, and validated before saving.
+- New installs enable mainland domain and IP direct rules by default. The settings page allows each preset to be toggled and accepts one custom domain suffix per line.
+- The renderer places service-group rules first, custom direct domain rules next, then optional `GEOSITE,CN,DIRECT` and `GEOIP,CN,DIRECT`, and the final `MATCH` route last. Direct settings and the generated YAML are persisted atomically. This only changes the client-facing unified subscription; Clash Cloud does not control tx Mihomo.
+
 ## Merged nodes and output
 
 - `GET /nodes?q=&subscriptionId=&limit=&offset=` → `{items:[{id,name,type,sourceId,sourceName,enabled}],total}`.

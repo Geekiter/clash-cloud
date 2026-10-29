@@ -243,7 +243,11 @@ func (a *App) persistManagedGroupsLocked(groups []ManagedGroup) error {
 			usable = append(usable, node)
 		}
 	}
-	publicConfig, err := buildManagedConfig(usable, groups)
+	directSettings, err := a.loadDirectRoutingSettings()
+	if err != nil {
+		return err
+	}
+	publicConfig, err := buildManagedConfig(usable, groups, directSettings)
 	if err != nil {
 		return err
 	}
