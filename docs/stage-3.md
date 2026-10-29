@@ -13,7 +13,7 @@ Estimated size: M.
 - [x] Return sanitized `unsupported_format` and `invalid_subscription` states (backend agent).
 - [x] Show concise Chinese messages in the React/MUI subscription list (frontend agent).
 - [x] Review Base64 handling, transport mappings, and unsupported inputs (deployment agent).
-- [ ] Deploy the release to tx and refresh the affected subscription.
+- [x] Deploy the release to tx and refresh the affected subscription.
 
 ## Actual record
 
@@ -23,6 +23,7 @@ Estimated size: M.
 | 2026-10-29 | Added strict scheme/input limits, safer parse error codes, and concise Chinese UI messages. | Backend + frontend |
 | 2026-10-29 | Static review identified and corrected Base64 plus handling, H2 option mapping, and unsupported VLESS encryption handling. | Backend + reviewer |
 | 2026-10-29 | Go build and production web build passed; no tests were run. | Backend + frontend |
+| 2026-10-29 | Deployed `556f93b` to tx. The upstream returned empty HTML without a client identity; `User-Agent: clash.meta` returned YAML and the configured feed refreshed successfully to 52 nodes. | Backend + deployment |
 
 ## Acceptance criteria
 
@@ -31,8 +32,8 @@ Estimated size: M.
 - [x] Malformed links fail as `invalid_subscription`; clearly unknown URI schemes fail as `unsupported_format`.
 - [x] Error messages do not contain source URLs, response bodies, or credentials.
 - [x] Go and web production builds succeed.
-- [ ] The tx UI accepts the existing affected subscription after refresh.
+- [x] The tx UI accepts the configured feed after refresh; it reports 52 nodes and `healthy`.
 
 ## Summary
 
-The backend now handles common URI-based feeds while retaining strict size and scheme limits. `ssr://`, provider-specific encrypted feeds, and unsupported protocol options remain outside this defined subset. tx rollout and a live refresh remain to be recorded.
+The backend now handles common URI-based feeds while retaining strict size and scheme limits. `ssr://`, provider-specific encrypted feeds, and unsupported protocol options remain outside this defined subset. The `clash.meta` fetch identity was added after safely identifying the upstream response negotiation. Release `556f93b` is active on tx and the feed is healthy with 52 nodes.
