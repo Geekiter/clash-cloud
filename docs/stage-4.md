@@ -24,6 +24,7 @@ Let administrators create multiple named subscription links for the same generat
 | 2026-10-29 | Kept legacy default URL metadata and token rotation coherent; transaction checks both rows before commit. | Backend |
 | 2026-10-29 | Added the React/MUI link management list with URL masking, copying, naming, and enable switches. | Frontend |
 | 2026-10-29 | Static review and Go/web production builds passed; no tests were run. | Backend + frontend + reviewer |
+| 2026-10-29 | Deployed release 4151f23 to tx. The existing token migrated to the enabled Default link; service health and the public UI returned successfully, and the configured feed remained healthy with 52 nodes. | Deployment |
 
 ## Acceptance criteria
 
@@ -36,4 +37,4 @@ Let administrators create multiple named subscription links for the same generat
 
 ## Summary
 
-Unified output supports multiple independently managed links. Existing deployments retain their current link as the enabled Default entry, and all links serve the same generated configuration. Production rollout is pending this stage implementation review.
+Unified output supports multiple independently managed links. Existing deployments retain their current link as the enabled Default entry, and all links serve the same generated configuration. Release 4151f23 is active on tx.
