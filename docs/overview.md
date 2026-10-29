@@ -10,7 +10,7 @@ The management UI uses React + Material UI and avoids redundant helper copy and 
 
 - Manage multiple subscription sources, refresh them safely, and retain each source's last valid snapshot after fetch or parse failures.
 - Accept Clash/Mihomo YAML, Base64-encoded YAML, and the supported subset of plain/Base64 URI feeds.
-- Merge enabled source nodes into one standalone Clash configuration, exposed through named links with independent tokens.
+- Merge enabled source nodes that are individually enabled into one standalone Clash configuration, exposed through named links with independent tokens.
 - Keep the subscription manager isolated from proxy runtime control. No Mihomo controller, node delay test, runtime selection, base config, or edge config is part of the application.
 - Develop on `ac`; deploy the subscription-management service to `tx`. Existing tx Mihomo services remain independently managed and untouched by Clash Cloud.
 

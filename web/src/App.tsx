@@ -23,7 +23,7 @@ import LogoutRounded from '@mui/icons-material/LogoutRounded'
 
 type SubStatus = 'pending' | 'healthy' | 'degraded' | 'failed' | 'disabled' | string
 type Subscription = { id: string; name: string; enabled: boolean; refreshIntervalSeconds: number; nodeCount: number; lastAttemptAt?: string | null; lastSuccessAt?: string | null; status: SubStatus; errorCode?: string | null }
-type NodeItem = { id: string; name: string; type: string; sourceId: string; sourceName: string }
+type NodeItem = { id: string; name: string; type: string; sourceId: string; sourceName: string; enabled: boolean }
 type OutputLink = { id: string; name: string; url: string; enabled: boolean; createdAt: string }
 type OutputState = { status: string; nodeCount: number; generatedAt?: string | null; revision?: number; url?: string; links?: OutputLink[] }
 type Page = 'subscriptions' | 'nodes' | 'output'
@@ -124,6 +124,7 @@ export default function App() {
   }
   const refreshSub = (sub: Subscription) => run(`refresh:${sub.id}`, () => api(`/subscriptions/${encodeURIComponent(sub.id)}/refresh`, { method: 'POST' }), '已加入刷新队列', async () => { await load('subscriptions') })
   const toggleSub = (sub: Subscription) => run(`toggle:${sub.id}`, () => api(`/subscriptions/${encodeURIComponent(sub.id)}`, { method: 'PATCH', body: JSON.stringify({ enabled: !sub.enabled }) }), sub.enabled ? '订阅已暂停' : '订阅已启用', async () => { await load('subscriptions') })
+  const toggleNode = (node: NodeItem) => run(`node-toggle:${node.id}`, () => api(`/nodes/${encodeURIComponent(node.id)}`, { method: 'PATCH', body: JSON.stringify({ enabled: !node.enabled }) }), node.enabled ? '节点已停用' : '节点已启用', async () => { await load('nodes') })
   const deleteSub = () => activeSub && run('delete', () => api(`/subscriptions/${encodeURIComponent(activeSub.id)}`, { method: 'DELETE' }), '订阅已删除', async () => { setDialog(null); await load('subscriptions') })
   const copyOutputLink = async (link: OutputLink) => {
     try { await navigator.clipboard.writeText(link.url); setNotice({ message: '链接已复制', severity: 'success' }) }
@@ -187,11 +188,11 @@ export default function App() {
             <FormControl size="small" className="filter-select"><InputLabel id="source-filter">全部订阅</InputLabel><Select labelId="source-filter" label="全部订阅" value={nodeFilter} onChange={e => setNodeFilter(e.target.value)}><MenuItem value="">全部订阅</MenuItem>{subs.map(s => <MenuItem key={s.id} value={s.id}>{s.name}</MenuItem>)}</Select></FormControl>
             <Typography className="result-count">{nodeTotal} 个节点</Typography>
           </Box>
-          <Paper className="table-paper" variant="outlined"><TableContainer><Table aria-label="节点列表"><TableHead><TableRow><TableCell>节点</TableCell><TableCell>来源</TableCell><TableCell>协议</TableCell></TableRow></TableHead><TableBody>
-            {loading && !nodes.length ? <TableRow><TableCell colSpan={3}><LoadingRows/></TableCell></TableRow> : nodes.map(node => <TableRow key={node.id} hover>
-              <TableCell><Typography fontWeight={650}>{node.name}</Typography></TableCell><TableCell>{node.sourceName}</TableCell><TableCell><Chip size="small" label={node.type}/></TableCell>
+          <Paper className="table-paper" variant="outlined"><TableContainer><Table aria-label="节点列表"><TableHead><TableRow><TableCell>节点</TableCell><TableCell>来源</TableCell><TableCell>协议</TableCell><TableCell>统一出口</TableCell></TableRow></TableHead><TableBody>
+            {loading && !nodes.length ? <TableRow><TableCell colSpan={4}><LoadingRows/></TableCell></TableRow> : nodes.map(node => <TableRow key={node.id} hover>
+              <TableCell><Typography fontWeight={650}>{node.name}</Typography></TableCell><TableCell>{node.sourceName}</TableCell><TableCell><Chip size="small" label={node.type}/></TableCell><TableCell><Tooltip title={node.enabled ? '在统一出口停用' : '加入统一出口'}><span><Switch size="small" checked={node.enabled} disabled={busy === `node-toggle:${node.id}`} onChange={() => void toggleNode(node)} inputProps={{ 'aria-label': `${node.enabled ? '停用' : '启用'} ${node.name}` }}/></span></Tooltip></TableCell>
             </TableRow>)}
-            {!loading && !nodes.length && <TableRow><TableCell colSpan={3}><Empty title="没有匹配的节点"/></TableCell></TableRow>}
+            {!loading && !nodes.length && <TableRow><TableCell colSpan={4}><Empty title="没有匹配的节点"/></TableCell></TableRow>}
           </TableBody></Table></TableContainer></Paper>
         </>}
 

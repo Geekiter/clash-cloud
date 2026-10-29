@@ -10,13 +10,14 @@ Same-origin JSON under `/api/v1`. Management routes are reachable only through t
 - `PATCH /subscriptions/{id}` body accepts `{name?,url?,enabled?,refreshIntervalSeconds?}`.
 - `DELETE /subscriptions/{id}` → `204`; deletes this source and its snapshots only.
 - `POST /subscriptions/{id}/refresh` → `202 {runId,status:"queued"}`; one refresh per source at a time.
-- `GET /subscriptions/{id}/nodes` → `{items:[{name,type,sourceId,sourceName}],total}` from the last valid snapshot.
+- `GET /subscriptions/{id}/nodes` → `{items:[{name,type,sourceId,sourceName,enabled}],total}` from the last valid snapshot.
 
 Statuses: `pending`, `healthy`, `degraded`, `failed`, `disabled`. The current implementation reports refresh failures as `failed` and disables as `disabled`. Keep the last valid node snapshot when a refresh fails.
 
 ## Merged nodes and output
 
-- `GET /nodes?q=&subscriptionId=&limit=&offset=` → `{items:[{id,name,type,sourceId,sourceName}],total}`.
+- `GET /nodes?q=&subscriptionId=&limit=&offset=` → `{items:[{id,name,type,sourceId,sourceName,enabled}],total}`.
+- `PATCH /nodes/{id}` body `{enabled:boolean}` → `{id,enabled}`; node-level state persists across subscription refreshes and renamed sources. Disabled nodes are omitted from every unified output link.
 - `GET /health` → `{status,version}` without secrets.
 
 - `GET /output` → `{status,nodeCount,generatedAt,revision,url,links}`. Each `links` item is `{id,name,url,enabled,createdAt}`; `url` remains the default link URL for compatibility. Link URLs are bearer credentials and are returned only through the authenticated management ingress.

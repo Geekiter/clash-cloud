@@ -45,6 +45,7 @@ type Node struct {
 	Type       string                 `json:"type"`
 	SourceID   string                 `json:"sourceId"`
 	SourceName string                 `json:"sourceName"`
+	Enabled    bool                   `json:"enabled"`
 	Raw        map[string]interface{} `json:"-"`
 }
 
@@ -180,6 +181,7 @@ func migrate(db *sql.DB) error {
 	public_url TEXT NOT NULL DEFAULT '',config BLOB NOT NULL DEFAULT '',generated_at TEXT,revision INTEGER NOT NULL DEFAULT 0);
 	CREATE TABLE IF NOT EXISTS output_links(id TEXT PRIMARY KEY,name TEXT NOT NULL,name_key TEXT NOT NULL UNIQUE,token_hash TEXT NOT NULL UNIQUE,
 	encrypted_token BLOB NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL);
+	CREATE TABLE IF NOT EXISTS node_settings(node_id TEXT PRIMARY KEY,enabled INTEGER NOT NULL DEFAULT 1);
 `)
 	return err
 }
@@ -343,6 +345,10 @@ func (a *App) api(w http.ResponseWriter, r *http.Request) { // Routes are protec
 	}
 	if p == "/nodes" && r.Method == http.MethodGet {
 		a.listNodes(w, r)
+		return
+	}
+	if strings.HasPrefix(p, "/nodes/") && r.Method == http.MethodPatch {
+		a.patchNode(w, r, strings.TrimPrefix(p, "/nodes/"))
 		return
 	}
 	if p == "/output" && r.Method == http.MethodGet {
@@ -809,6 +815,53 @@ func (a *App) sourceNodes(w http.ResponseWriter, id string) {
 	}
 	jsonResponse(w, 200, map[string]interface{}{"items": items, "total": len(items)})
 }
+func (a *App) patchNode(w http.ResponseWriter, r *http.Request, id string) {
+	decodedID, err := hex.DecodeString(id)
+	if err != nil || len(decodedID) != 12 || strings.Contains(id, "/") {
+		apiError(w, 404, "not_found", "Node not found")
+		return
+	}
+	var in struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	if in.Enabled == nil {
+		apiError(w, 400, "invalid_enabled", "Enabled must be boolean")
+		return
+	}
+	nodes, err := a.allNodes(false)
+	if err != nil {
+		internal(w)
+		return
+	}
+	var node *Node
+	for i := range nodes {
+		if nodes[i].ID == id {
+			node = &nodes[i]
+			break
+		}
+	}
+	if node == nil {
+		apiError(w, 404, "not_found", "Node not found")
+		return
+	}
+	value := 0
+	if *in.Enabled {
+		value = 1
+	}
+	if _, err := a.db.Exec(`INSERT INTO node_settings(node_id,enabled) VALUES(?,?) ON CONFLICT(node_id) DO UPDATE SET enabled=excluded.enabled`, id, value); err != nil {
+		internal(w)
+		return
+	}
+	if err := a.regenerate(); err != nil {
+		apiError(w, 409, "output_unavailable", "Could not safely regenerate output")
+		return
+	}
+	jsonResponse(w, 200, map[string]interface{}{"id": id, "enabled": *in.Enabled})
+}
+
 func (a *App) listNodes(w http.ResponseWriter, r *http.Request) {
 	q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 	sub := r.URL.Query().Get("subscriptionId")
@@ -909,8 +962,14 @@ func (a *App) outputInfo(w http.ResponseWriter) {
 		internal(w)
 		return
 	}
+	activeNodeCount := 0
+	for _, node := range nodes {
+		if node.Enabled {
+			activeNodeCount++
+		}
+	}
 	status := "healthy"
-	if len(nodes) == 0 {
+	if activeNodeCount == 0 {
 		status = "no_nodes"
 	} else if len(config) == 0 {
 		status = "pending"
@@ -926,7 +985,7 @@ func (a *App) outputInfo(w http.ResponseWriter) {
 			break
 		}
 	}
-	jsonResponse(w, 200, map[string]interface{}{"status": status, "nodeCount": len(nodes), "generatedAt": gt, "revision": rev, "url": legacyURL, "links": links})
+	jsonResponse(w, 200, map[string]interface{}{"status": status, "nodeCount": activeNodeCount, "generatedAt": gt, "revision": rev, "url": legacyURL, "links": links})
 }
 
 func validOutputLinkName(name string) (string, string, bool) {
@@ -1172,8 +1231,29 @@ func (a *App) allNodes(enabledOnly bool) ([]Node, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	settings := map[string]bool{}
+	settingRows, err := a.db.Query(`SELECT node_id,enabled FROM node_settings`)
+	if err != nil {
+		return nil, err
+	}
+	for settingRows.Next() {
+		var id string
+		var enabled int
+		if err := settingRows.Scan(&id, &enabled); err != nil {
+			settingRows.Close()
+			return nil, err
+		}
+		settings[id] = enabled != 0
+	}
+	if err := settingRows.Err(); err != nil {
+		settingRows.Close()
+		return nil, err
+	}
+	settingRows.Close()
 	used := map[string]bool{}
 	for i := range out {
+		enabled, configured := settings[out[i].ID]
+		out[i].Enabled = !configured || enabled
 		name := out[i].Name
 		if used[name] {
 			suffix := out[i].SourceID
@@ -1408,19 +1488,22 @@ func nodesFromProxyMaps(proxies []map[string]interface{}, sourceID, sourceName s
 		if !ok || strings.TrimSpace(typ) == "" || len(typ) > 40 {
 			return nil, parseFailure("invalid_subscription")
 		}
-		base := strings.TrimSpace(sourceName) + " / " + strings.TrimSpace(name)
-		seen[base]++
+		originalName := strings.TrimSpace(name)
+		base := strings.TrimSpace(sourceName) + " / " + originalName
+		seen[originalName]++
 		mergedName := base
-		if seen[base] > 1 {
-			mergedName = fmt.Sprintf("%s (%d)", base, seen[base])
+		if seen[originalName] > 1 {
+			mergedName = fmt.Sprintf("%s (%d)", base, seen[originalName])
 		}
-		raw["name"] = mergedName
 		buf, err := json.Marshal(raw)
 		if err != nil {
 			return nil, parseFailure("invalid_subscription")
 		}
-		sum := sha256.Sum256(append([]byte(sourceID+"\x00"), buf...))
-		out = append(out, Node{ID: hex.EncodeToString(sum[:12]), Name: mergedName, Type: typ, SourceID: sourceID, SourceName: sourceName, Raw: raw})
+		fingerprint := append([]byte(sourceID+"\x00"), buf...)
+		fingerprint = append(fingerprint, []byte(fmt.Sprintf("\x00%d", seen[originalName]))...)
+		sum := sha256.Sum256(fingerprint)
+		raw["name"] = mergedName
+		out = append(out, Node{ID: hex.EncodeToString(sum[:12]), Name: mergedName, Type: typ, SourceID: sourceID, SourceName: sourceName, Enabled: true, Raw: raw})
 	}
 	return out, nil
 }
@@ -1433,7 +1516,7 @@ func (a *App) regenerate() error {
 	proxies := make([]map[string]interface{}, 0, len(nodes))
 	names := make([]string, 0, len(nodes))
 	for _, node := range nodes {
-		if node.Raw != nil {
+		if node.Enabled && node.Raw != nil {
 			proxies = append(proxies, node.Raw)
 			names = append(names, node.Name)
 		}
