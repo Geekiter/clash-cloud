@@ -1255,6 +1255,11 @@ func (a *App) allNodes(enabledOnly bool) ([]Node, error) {
 		enabled, configured := settings[out[i].ID]
 		out[i].Enabled = !configured || enabled
 		name := out[i].Name
+		prefix := out[i].SourceName + " / "
+		if strings.HasPrefix(name, prefix) {
+			nodeName := strings.TrimPrefix(name, prefix)
+			name = nodeName + "-" + out[i].SourceName
+		}
 		if used[name] {
 			suffix := out[i].SourceID
 			if len(suffix) > 6 {
