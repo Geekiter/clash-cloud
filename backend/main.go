@@ -125,6 +125,9 @@ func main() {
 	if err := a.ensureOutputToken(outURL); err != nil {
 		log.Fatal("cannot initialize output token")
 	}
+	if err := a.regenerate(); err != nil {
+		log.Fatal("cannot initialize unified output")
+	}
 	go a.scheduler()
 	addr := env("CLASH_CLOUD_LISTEN", "127.0.0.1:8080")
 	mux := http.NewServeMux()
