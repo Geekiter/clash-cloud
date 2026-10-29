@@ -1143,6 +1143,7 @@ func (a *App) refreshStarted(id string) {
 		a.refreshFailed(id, "invalid_url")
 		return
 	}
+	req.Header.Set("User-Agent", "clash.meta")
 	resp, e := a.client.Do(req)
 	if e != nil {
 		a.refreshFailed(id, safeFetchCode(e))
