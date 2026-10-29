@@ -28,7 +28,7 @@ body { margin: 0; min-width: 320px; background: #f7f5ef; }
 .status.bad { color: #a76120; }.status.bad i { background: #d1933e; }
 .status.pending { color: #77736c; }.status.pending i { background: #c19a54; }
 .status.muted { color: #727984; }.status.muted i { background: #a6abb1; }
-.error-code { color: #a76120; font-size: 12px; margin-top: 2px; }
+.error-code { color: #a76120; font-size: 14px; margin-top: 3px; }
 .output-strip { margin-top: 23px; padding: 17px 19px; border: 1px solid #e7e2d9; background: #fffefa; border-radius: 10px; display: grid; grid-template-columns: 170px 1fr auto; align-items: center; gap: 16px; }
 .output-label { min-width: 0; }.url-preview { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #59616a; font-size: 14px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .empty { min-height: 154px; display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 16px; color: #626b74; }

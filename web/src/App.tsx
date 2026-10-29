@@ -39,6 +39,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 }
 const fmtDate = (value?: string | null) => value ? new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(new Date(value)) : '—'
 const statusText: Record<string, string> = { pending: '更新中', healthy: '正常', degraded: '部分异常', failed: '更新失败', disabled: '已暂停' }
+const subscriptionErrorText: Record<string, string> = { unsupported_format: '不支持的订阅格式', invalid_subscription: '订阅内容无效' }
 
 function Status({ status }: { status: SubStatus }) {
   const good = status === 'healthy'
@@ -164,7 +165,7 @@ export default function App() {
               <TableHead><TableRow><TableCell>名称</TableCell><TableCell align="right">节点</TableCell><TableCell>上次刷新</TableCell><TableCell>状态</TableCell><TableCell align="right">操作</TableCell></TableRow></TableHead>
               <TableBody>
                 {loading && !subs.length ? <TableRow><TableCell colSpan={5}><LoadingRows/></TableCell></TableRow> : subs.map(sub => <TableRow key={sub.id} hover>
-                  <TableCell><Typography fontWeight={650}>{sub.name}</Typography>{sub.errorCode && <Typography className="error-code">{sub.errorCode}</Typography>}</TableCell>
+                  <TableCell><Typography fontWeight={650}>{sub.name}</Typography>{sub.errorCode && <Typography className="error-code">{subscriptionErrorText[sub.errorCode] || '刷新失败'}</Typography>}</TableCell>
                   <TableCell align="right" className="numeric">{sub.nodeCount}</TableCell><TableCell className="date-cell">{fmtDate(sub.lastSuccessAt || sub.lastAttemptAt)}</TableCell><TableCell><Status status={sub.enabled ? sub.status : 'disabled'}/></TableCell>
                   <TableCell align="right"><Stack direction="row" spacing={0.25} alignItems="center" justifyContent="flex-end">
                     <Tooltip title="刷新"><span><IconButton size="small" aria-label={`刷新 ${sub.name}`} disabled={busy === `refresh:${sub.id}`} onClick={() => void refreshSub(sub)}>{busy === `refresh:${sub.id}` ? <CircularProgress size={18}/> : <AutorenewRounded fontSize="small"/>}</IconButton></span></Tooltip>

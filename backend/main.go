@@ -1160,7 +1160,12 @@ func (a *App) refreshStarted(id string) {
 	}
 	nodes, e := parseNodes(body, id, name)
 	if e != nil {
-		a.refreshFailed(id, "invalid_subscription")
+		code := "invalid_subscription"
+		var parseErr *parseCodeError
+		if errors.As(e, &parseErr) && (parseErr.code == "unsupported_format" || parseErr.code == "invalid_subscription") {
+			code = parseErr.code
+		}
+		a.refreshFailed(id, code)
 		return
 	}
 	if len(nodes) == 0 {
@@ -1246,39 +1251,71 @@ func (a *App) scheduler() {
 	}
 }
 func parseNodes(body []byte, sourceID, sourceName string) ([]Node, error) {
-	data := body
-	var doc map[string]interface{}
-	if yaml.Unmarshal(data, &doc) != nil || doc["proxies"] == nil {
-		decoded, e := base64.StdEncoding.DecodeString(strings.TrimSpace(string(body)))
-		if e != nil {
-			decoded, e = base64.RawStdEncoding.DecodeString(strings.TrimSpace(string(body)))
+	if proxies, handled, err := parseURIList(body); handled {
+		if err != nil {
+			return nil, err
 		}
-		if e != nil {
-			return nil, errors.New("bad_yaml")
-		}
-		data = decoded
-		if yaml.Unmarshal(data, &doc) != nil {
-			return nil, errors.New("bad_yaml")
-		}
+		return nodesFromProxyMaps(proxies, sourceID, sourceName)
 	}
-	list, ok := doc["proxies"].([]interface{})
-	if !ok || len(list) > maxNodes {
-		return nil, errors.New("bad_proxies")
+
+	candidates := [][]byte{body}
+	if decoded := decodeSubscriptionBase64(body); len(decoded) > 0 && !bytes.Equal(decoded, body) {
+		candidates = append(candidates, decoded)
 	}
-	out := []Node{}
-	seen := map[string]int{}
-	for _, item := range list {
-		raw, ok := item.(map[string]interface{})
-		if !ok {
+	for _, data := range candidates {
+		var doc map[string]interface{}
+		if err := yaml.Unmarshal(data, &doc); err != nil || doc == nil {
 			continue
 		}
+		value, exists := doc["proxies"]
+		if !exists {
+			continue
+		}
+		list, ok := value.([]interface{})
+		if !ok || len(list) == 0 || len(list) > maxNodes {
+			return nil, parseFailure("invalid_subscription")
+		}
+		proxies := make([]map[string]interface{}, 0, len(list))
+		for _, item := range list {
+			raw, ok := item.(map[string]interface{})
+			if !ok {
+				return nil, parseFailure("invalid_subscription")
+			}
+			name, nameOK := raw["name"].(string)
+			typ, typeOK := raw["type"].(string)
+			if !nameOK || strings.TrimSpace(name) == "" || len(name) > maxNameLength || !typeOK || strings.TrimSpace(typ) == "" || len(typ) > 40 {
+				return nil, parseFailure("invalid_subscription")
+			}
+			proxies = append(proxies, raw)
+		}
+		return nodesFromProxyMaps(proxies, sourceID, sourceName)
+	}
+
+	if len(candidates) > 1 {
+		if proxies, handled, err := parseURIList(candidates[1]); handled {
+			if err != nil {
+				return nil, err
+			}
+			return nodesFromProxyMaps(proxies, sourceID, sourceName)
+		}
+	}
+	return nil, parseFailure("invalid_subscription")
+}
+
+func nodesFromProxyMaps(proxies []map[string]interface{}, sourceID, sourceName string) ([]Node, error) {
+	if len(proxies) == 0 || len(proxies) > maxNodes {
+		return nil, parseFailure("invalid_subscription")
+	}
+	out := make([]Node, 0, len(proxies))
+	seen := map[string]int{}
+	for _, raw := range proxies {
 		name, ok := raw["name"].(string)
 		if !ok || strings.TrimSpace(name) == "" || len(name) > maxNameLength {
-			continue
+			return nil, parseFailure("invalid_subscription")
 		}
 		typ, ok := raw["type"].(string)
-		if !ok || typ == "" || len(typ) > 40 {
-			continue
+		if !ok || strings.TrimSpace(typ) == "" || len(typ) > 40 {
+			return nil, parseFailure("invalid_subscription")
 		}
 		base := strings.TrimSpace(sourceName) + " / " + strings.TrimSpace(name)
 		seen[base]++
@@ -1287,15 +1324,16 @@ func parseNodes(body []byte, sourceID, sourceName string) ([]Node, error) {
 			mergedName = fmt.Sprintf("%s (%d)", base, seen[base])
 		}
 		raw["name"] = mergedName
-		buf, e := json.Marshal(raw)
-		if e != nil {
-			continue
+		buf, err := json.Marshal(raw)
+		if err != nil {
+			return nil, parseFailure("invalid_subscription")
 		}
 		sum := sha256.Sum256(append([]byte(sourceID+"\x00"), buf...))
 		out = append(out, Node{ID: hex.EncodeToString(sum[:12]), Name: mergedName, Type: typ, SourceID: sourceID, SourceName: sourceName, Raw: raw})
 	}
 	return out, nil
 }
+
 func (a *App) edgeConfigured() bool {
 	return a.baseConfigPath != "" || a.edgeConfigPath != "" || a.mihomoBin != ""
 }
