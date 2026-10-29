@@ -5,6 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+UnsetEnvironment=HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
 ExecStart=/usr/local/bin/frpc -c %h/.config/frp/clash-cloud.ini
 Restart=on-failure
 RestartSec=5
