@@ -7,8 +7,6 @@ Wants=network-online.target
 Type=simple
 User=clash-cloud
 Group=clash-cloud
-SupplementaryGroups=clash-cloud-edge
-Environment=SAFE_PATHS=/var/lib/clash-cloud/edge
 UMask=0077
 EnvironmentFile=/etc/clash-cloud/clash-cloud.env
 WorkingDirectory=/var/lib/clash-cloud
