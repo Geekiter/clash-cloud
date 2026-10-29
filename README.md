@@ -8,7 +8,7 @@ Manage multiple Mihomo-compatible subscriptions and publish their usable nodes t
 - Unified node inventory and selection/testing.
 - One generated Mihomo YAML subscription endpoint.
 - React + TypeScript + Material UI frontend; Go control plane; SQLite for a single initial deployment.
-- Develop on `ac`; deploy to `tx` only after review and explicit rollout preparation.
+- The active application runtime is on `ac`; `tx` provides the public TLS/FRP ingress for `clash-cloud.chenkeyan.com`.
 
 The current GitHub repository was empty at project start. Design and technical proposal are in Outline:
 - UI: https://outline.chenkeyan.com/doc/clash-cloud-ui-oZTQb0lmHe

@@ -1,0 +1,18 @@
+[Unit]
+Description=Clash Cloud domain tunnel from AC to TX FRPS
+After=network-online.target clash-cloud-web.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/frpc -c %h/.config/frp/clash-cloud.ini
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=%h/.config/frp/clash-cloud.ini
+
+[Install]
+WantedBy=default.target

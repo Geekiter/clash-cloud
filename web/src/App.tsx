@@ -306,7 +306,7 @@ function DirectRoutingPanel({ settings, domainsText, busy, onDomainsChange, onTo
         <Stack direction="row" alignItems="center" justifyContent="space-between" className="group-enable" sx={{ flex: 1 }}><Typography>大陆 IP 直连</Typography><Switch size="small" checked={settings.chinaIPDirect} disabled={busy} onChange={onToggleIP}/></Stack>
       </Stack>
       <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1.5} alignItems={{ sm: 'flex-start' }}>
-        <TextField fullWidth multiline minRows={2} label="指定域名直连" placeholder="example.cn" value={domainsText} onChange={event => onDomainsChange(event.target.value)}/>
+        <TextField fullWidth multiline minRows={2} label="指定域名直连" placeholder="example.com" helperText="每行一个域名，可批量输入，最多 100 个；匹配该域名及其子域名，不要加 https:// 或路径。" value={domainsText} onChange={event => onDomainsChange(event.target.value)}/>
         <Button variant="contained" disabled={busy} onClick={onSaveDomains} sx={{ minWidth: 140 }}>保存直连规则</Button>
       </Stack>
     </Stack>

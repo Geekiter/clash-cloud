@@ -2,6 +2,18 @@
 
 Clash Cloud is deployed as a subscription-management service. It does not control tx's Mihomo. Existing Mihomo services are independent and must remain untouched by Clash Cloud deploys. The edge-shadow examples below are historical reference material only; the application no longer consumes their variables, writes their configs, or calls their controllers.
 
+## Active deployment topology
+
+The Clash Cloud application runs on `ac`. `tx` provides the public TLS endpoint and FRP server for `clash-cloud.chenkeyan.com`; AC runs the Go backend, SQLite database, static web gateway, and an FRP client that registers the domain through TX. The AC app listens only on loopback (`127.0.0.1:18082` for the backend and `127.0.0.1:18081` for the web gateway). The gateway validates `X-Clash-Cloud-Ingress` before serving the UI or proxying `/auth/`, `/api/v1/`, and `/s/` to the backend.
+
+TX does not run the active Clash Cloud backend or database. Its previous `/opt/clash-cloud` release, `clash-cloud.service`, and `clash-cloud-frpc.service` are retained as a rollback copy and are disabled. The TX FRPS and TLS Nginx ingress remain active. AC user-level services are enabled with lingering so they start at boot. Keep the AC encryption key, OAuth secrets, SQLite database, and FRP token out of Git.
+
+On AC, the active release pointer is `~/.local/opt/clash-cloud/current`; mutable state and protected environment files live under `~/.local/share/clash-cloud` with mode `0700`, and secret files use mode `0600`. The AC backend listens on loopback port `18082`. The Node web gateway serves the React build on `127.0.0.1:18081`, validates the ingress header, and forwards application endpoints to the backend. The AC FRPC client registers the custom domain with TX FRPS. User services are defined in `systemd/clash-cloud-*.user.service`; enable user lingering so they survive logout and start at boot. The gateway source is `deploy/ac-web-server.mjs`.
+
+At cutover, stop and disable the old TX `clash-cloud-frpc.service` and `clash-cloud.service`, then start the AC FRPC service after confirming the AC backend and gateway are healthy. Keep the old TX release and database until the AC deployment has been verified. For rollback, stop the AC FRPC service and restart the TX domain FRPC and backend services.
+
+The following TX-local install examples are historical references; they are not the active deployment topology.
+
 ## Filesystem layout
 
 - /opt/clash-cloud/releases/<version>/: immutable application release, owned by root:root, mode 0755.

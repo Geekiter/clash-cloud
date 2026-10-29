@@ -1,0 +1,24 @@
+[Unit]
+Description=Clash Cloud web ingress on AC
+After=network-online.target clash-cloud-backend.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.local/share/clash-cloud/ingress.env
+Environment=CLASH_CLOUD_WEB_ROOT=%h/.local/opt/clash-cloud/current/web/dist
+Environment=CLASH_CLOUD_BACKEND_URL=http://127.0.0.1:18082
+Environment=CLASH_CLOUD_WEB_HOST=127.0.0.1
+Environment=CLASH_CLOUD_WEB_PORT=18081
+ExecStart=/usr/bin/node %h/.local/opt/clash-cloud/current/web-server.mjs
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadOnlyPaths=%h/.local/opt/clash-cloud/current/web/dist
+ReadWritePaths=%h/.local/share/clash-cloud
+
+[Install]
+WantedBy=default.target
