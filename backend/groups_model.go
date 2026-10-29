@@ -49,6 +49,7 @@ func defaultManagedGroups() []ManagedGroup {
 	return []ManagedGroup{
 		service("chatgpt", "ChatGPT", "openai", "https://chatgpt.com/", "200-399"),
 		service("claude", "Claude", "anthropic", "https://claude.ai/", "200-399"),
+		service("docker", "Docker", "docker", "https://registry-1.docker.io/v2/", "401"),
 		selected("google-us", "Google-US", "https://www.google.com/generate_204", "204", []GroupRule{{Type: "geosite", Value: "google"}, {Type: "geosite", Value: "youtube"}}),
 		service("github", "GitHub", "github", "https://github.com/", "200-399"),
 		service("reddit", "Reddit", "reddit", "https://www.reddit.com/", "200-399"),

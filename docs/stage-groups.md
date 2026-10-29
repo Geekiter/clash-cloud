@@ -3,13 +3,13 @@
 ## Background and value
 
 - Background: the public subscription currently emits a single `PROXY` selector and `MATCH,PROXY`; service-specific health and routing are not configurable.
-- Value: keep ChatGPT, Claude, Google and YouTube, GitHub, Reddit, and general traffic on independent Mihomo groups. Add region-scoped groups for US/Europe and Asia without routing domains to them yet.
+- Value: keep ChatGPT, Claude, Docker registry, Google and YouTube, GitHub, Reddit, and general traffic on independent Mihomo groups. Add region-scoped groups for US/Europe and Asia without routing domains to them yet.
 - Workload: M.
 
 ## Decisions
 
 - Clash Cloud stores group policy and emits client-side proxy groups and ordered domain rules. It does not issue runtime health checks or manage tx Mihomo.
-- Service groups default to independent `url-test` groups with a 180-second interval and all enabled nodes as candidates.
+- Service groups default to independent `url-test` groups with a 180-second interval and all enabled nodes as candidates. Docker uses `geosite:docker` and probes the Docker Hub Registry API, where an unauthenticated `401` confirms reachability.
 - Google-US combines Google and YouTube domain rules and uses manually selected node membership so region eligibility is explicit. Region groups 美欧 and 亚洲 also use explicit membership and have no domain rules by default.
 - Mainland domain and IP traffic defaults to direct. Custom domain suffixes can also be routed direct.
 - The generic group is the final `MATCH` route after service and direct rules.
@@ -26,7 +26,7 @@
 
 ## Acceptance criteria
 
-- [x] All eight initial groups are visible and editable as allowed; built-in groups cannot be deleted.
+- [x] All nine initial groups are visible and editable as allowed; built-in groups cannot be deleted.
 - [x] Service groups route their domain rules to independent `url-test` groups; each can use different candidates and probe settings.
 - [x] Google-US, 美欧, and 亚洲 include only manually selected, currently enabled nodes.
 - [x] 美欧 and 亚洲 have no domain routes by default; domain rules can be added later without changing the `MATCH` route.
@@ -47,4 +47,4 @@
 
 ## Summary
 
-Eight built-in groups and custom group management are available in the ac working tree. Region membership is explicitly selected, and empty selected groups are omitted until they have enabled nodes. The feature updates only the public unified subscription output.
+Nine built-in groups and custom group management are available in the ac working tree. Region membership is explicitly selected, and empty selected groups are omitted until they have enabled nodes. The feature updates only the public unified subscription output.

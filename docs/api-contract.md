@@ -21,13 +21,14 @@ Statuses: `pending`, `healthy`, `degraded`, `failed`, `disabled`. The current im
 - `PATCH /groups/{id}` accepts any subset of editable fields and returns `{group}`. `id` and `builtIn` are immutable.
 - `DELETE /groups/{id}` → `204`; built-in groups cannot be deleted and return `409 builtin_group`.
 - A group has `{id,name,enabled,rules,nodeMode,nodeIds,strategy,testUrl,intervalSeconds,timeoutMs,expectedStatus,lazy,builtIn}`. Rules are `{type,value}`, where `type` is `geosite` or `domain-suffix`. The only supported strategy is `url-test`. `expectedStatus` is a string containing an HTTP status code, inclusive range, or slash-separated combination (for example `204`, `200-399`, or `200-399/404`).
-- The service seeds eight built-ins in this order: `chatgpt`/ChatGPT, `claude`/Claude, `google-us`/Google-US, `github`/GitHub, `reddit`/Reddit, `general`/通用, `europe-us`/美欧, and `asia`/亚洲. ChatGPT, Claude, GitHub, and Reddit use `all_enabled`; Google-US, 美欧, and 亚洲 use `selected` and start with no node IDs; 通用 is the enabled final MATCH group and uses `all_enabled`. Region groups start without domain rules. Built-ins may be edited, but their IDs and `builtIn` state cannot change; 通用 cannot be disabled.
+- The service seeds nine built-ins in this order: `chatgpt`/ChatGPT, `claude`/Claude, `docker`/Docker, `google-us`/Google-US, `github`/GitHub, `reddit`/Reddit, `general`/通用, `europe-us`/美欧, and `asia`/亚洲. ChatGPT, Claude, Docker, GitHub, and Reddit use `all_enabled`; Google-US, 美欧, and 亚洲 use `selected` and start with no node IDs; 通用 is the enabled final MATCH group and uses `all_enabled`. Region groups start without domain rules. Built-ins may be edited, but their IDs and `builtIn` state cannot change; 通用 cannot be disabled.
 - Initial preset values (all use `url-test`, 180-second interval, 5000 ms timeout, and `lazy:false`):
 
   | ID | Name | Rules | Membership | Test URL | Expected status |
   | --- | --- | --- | --- | --- | --- |
   | `chatgpt` | ChatGPT | `geosite:openai` | `all_enabled` | `https://chatgpt.com/` | `200-399` |
   | `claude` | Claude | `geosite:anthropic` | `all_enabled` | `https://claude.ai/` | `200-399` |
+  | `docker` | Docker | `geosite:docker` | `all_enabled` | `https://registry-1.docker.io/v2/` | `401` |
   | `google-us` | Google-US | `geosite:google`, `geosite:youtube` | `selected`, empty | `https://www.google.com/generate_204` | `204` |
   | `github` | GitHub | `geosite:github` | `all_enabled` | `https://github.com/` | `200-399` |
   | `reddit` | Reddit | `geosite:reddit` | `all_enabled` | `https://www.reddit.com/` | `200-399` |

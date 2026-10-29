@@ -34,7 +34,7 @@ type OutputState = { status: string; nodeCount: number; generatedAt?: string | n
 type Page = 'subscriptions' | 'nodes' | 'output' | 'groups'
 type Notice = { message: string; severity: 'success' | 'error' | 'info' }
 const API = '/api/v1'
-const serviceGroupIds = new Set(['chatgpt', 'claude', 'google-us', 'github', 'reddit'])
+const serviceGroupIds = new Set(['chatgpt', 'claude', 'docker', 'google-us', 'github', 'reddit'])
 const regionGroupIds = new Set(['europe-us', 'asia'])
 const manualMembershipGroupIds = new Set(['google-us', 'europe-us', 'asia'])
 
