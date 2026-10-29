@@ -53,6 +53,7 @@ func defaultManagedGroups() []ManagedGroup {
 		selected("google-us", "Google-US", "https://www.google.com/generate_204", "204", []GroupRule{{Type: "geosite", Value: "google"}, {Type: "geosite", Value: "youtube"}}),
 		service("github", "GitHub", "github", "https://github.com/", "200-399"),
 		service("reddit", "Reddit", "reddit", "https://www.reddit.com/", "200-399"),
+		service("steam", "Steam", "steam", "https://store.steampowered.com/", "200-399"),
 		{
 			ID: "general", Name: "通用", Enabled: true, Rules: []GroupRule{},
 			NodeMode: "all_enabled", NodeIDs: []string{}, Strategy: "url-test",
