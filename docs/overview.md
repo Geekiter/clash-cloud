@@ -28,6 +28,7 @@ The management UI uses React + Material UI and avoids redundant helper copy and 
 3. URI subscriptions: convert supported proxy URI feeds into Clash nodes and display sanitized format errors.
 4. Multiple unified output links: create named links with independent tokens and enable or disable each link.
 5. Subscription-only architecture: remove Mihomo controller, edge publishing, server-side delay testing, and server-side node selection.
+6. Managed traffic and region groups: configure domain-specific groups and client-side health checks without connecting Clash Cloud to tx Mihomo.
 
 ## Stage records
 
@@ -35,4 +36,5 @@ The management UI uses React + Material UI and avoids redundant helper copy and 
 - Stage 2: `stage-2.md` (historical rollout record).
 - Stage 3: `stage-3.md`.
 - Stage 5: `stage-5.md`.
+- Stage 6: `stage-groups.md`.
 - Shared API contract: `api-contract.md`.

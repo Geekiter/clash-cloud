@@ -72,6 +72,7 @@ type App struct {
 	client            *http.Client
 	refreshMu         sync.Mutex
 	refreshing        map[string]bool
+	groupsMu          sync.Mutex
 	oauthEnabled      bool
 	oauthClientID     string
 	oauthClientSecret string
@@ -124,6 +125,9 @@ func main() {
 	}
 	if err := a.ensureOutputToken(outURL); err != nil {
 		log.Fatal("cannot initialize output token")
+	}
+	if err := a.ensureManagedGroups(); err != nil {
+		log.Fatal("cannot initialize managed groups")
 	}
 	if err := a.regenerate(); err != nil {
 		log.Fatal("cannot initialize unified output")
@@ -185,6 +189,7 @@ func migrate(db *sql.DB) error {
 	CREATE TABLE IF NOT EXISTS output_links(id TEXT PRIMARY KEY,name TEXT NOT NULL,name_key TEXT NOT NULL UNIQUE,token_hash TEXT NOT NULL UNIQUE,
 	encrypted_token BLOB NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL);
 	CREATE TABLE IF NOT EXISTS node_settings(node_id TEXT PRIMARY KEY,enabled INTEGER NOT NULL DEFAULT 1);
+	CREATE TABLE IF NOT EXISTS managed_groups(id TEXT PRIMARY KEY,position INTEGER NOT NULL,config_json BLOB NOT NULL);
 `)
 	return err
 }
@@ -348,6 +353,29 @@ func (a *App) api(w http.ResponseWriter, r *http.Request) { // Routes are protec
 	}
 	if p == "/nodes" && r.Method == http.MethodGet {
 		a.listNodes(w, r)
+		return
+	}
+	if p == "/groups" {
+		switch r.Method {
+		case http.MethodGet:
+			a.listManagedGroups(w)
+		case http.MethodPost:
+			a.createManagedGroup(w, r)
+		default:
+			method(w)
+		}
+		return
+	}
+	if strings.HasPrefix(p, "/groups/") {
+		id := strings.TrimPrefix(p, "/groups/")
+		switch r.Method {
+		case http.MethodPatch:
+			a.patchManagedGroup(w, r, id)
+		case http.MethodDelete:
+			a.deleteManagedGroup(w, id)
+		default:
+			method(w)
+		}
 		return
 	}
 	if strings.HasPrefix(p, "/nodes/") && r.Method == http.MethodPatch {
@@ -1571,21 +1599,28 @@ func nodesFromProxyMaps(proxies []map[string]interface{}, sourceID, sourceName s
 }
 
 func (a *App) regenerate() error {
+	a.groupsMu.Lock()
+	defer a.groupsMu.Unlock()
+	return a.regenerateManagedGroupsLocked()
+}
+
+func (a *App) regenerateManagedGroupsLocked() error {
 	nodes, err := a.allNodes(true)
 	if err != nil {
 		return err
 	}
-	proxies := make([]map[string]interface{}, 0, len(nodes))
-	names := make([]string, 0, len(nodes))
+	usable := nodes[:0]
 	for _, node := range nodes {
-		if node.Enabled && node.Raw != nil {
-			proxies = append(proxies, node.Raw)
-			names = append(names, node.Name)
+		if node.Enabled {
+			usable = append(usable, node)
 		}
 	}
-	group := map[string]interface{}{"name": "PROXY", "type": "select", "proxies": append(names, "DIRECT")}
-	config := map[string]interface{}{"mixed-port": 7890, "allow-lan": false, "mode": "rule", "log-level": "info", "proxies": proxies, "proxy-groups": []interface{}{group}, "rules": []string{"MATCH,PROXY"}}
-	publicConfig, err := yaml.Marshal(config)
+	nodes = usable
+	groups, err := a.loadManagedGroups()
+	if err != nil {
+		return err
+	}
+	publicConfig, err := buildManagedConfig(nodes, groups)
 	if err != nil {
 		return err
 	}
