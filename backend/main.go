@@ -1429,6 +1429,63 @@ func (a *App) scheduler() {
 		}
 	}
 }
+func decodeSubscriptionYAML(data []byte) (map[string]interface{}, error) {
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return nil, err
+	}
+	preserveRealityShortIDs(&root)
+	var doc map[string]interface{}
+	if err := root.Decode(&doc); err != nil {
+		return nil, err
+	}
+	return doc, nil
+}
+
+func preserveRealityShortIDs(root *yaml.Node) {
+	if root.Kind == yaml.DocumentNode {
+		if len(root.Content) == 0 {
+			return
+		}
+		root = root.Content[0]
+	}
+	proxies := yamlMappingValue(root, "proxies")
+	if proxies == nil || proxies.Kind != yaml.SequenceNode {
+		return
+	}
+	for _, proxy := range proxies.Content {
+		reality := yamlMappingValue(proxy, "reality-opts")
+		shortID := yamlMappingValue(reality, "short-id")
+		if shortID == nil || shortID.Kind != yaml.ScalarNode {
+			continue
+		}
+		if shortID.Tag == "!!null" {
+			for i := 0; i+1 < len(reality.Content); i += 2 {
+				if reality.Content[i].Value == "short-id" {
+					reality.Content = append(reality.Content[:i], reality.Content[i+2:]...)
+					break
+				}
+			}
+			continue
+		}
+		// REALITY short IDs are hexadecimal strings. Keep the YAML scalar's
+		// original spelling even when it looks like a number or exponent.
+		shortID.Tag = "!!str"
+	}
+}
+
+func yamlMappingValue(node *yaml.Node, key string) *yaml.Node {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return node.Content[i+1]
+		}
+	}
+	return nil
+}
+
 func parseNodes(body []byte, sourceID, sourceName string) ([]Node, error) {
 	if proxies, handled, err := parseURIList(body); handled {
 		if err != nil {
@@ -1442,8 +1499,8 @@ func parseNodes(body []byte, sourceID, sourceName string) ([]Node, error) {
 		candidates = append(candidates, decoded)
 	}
 	for _, data := range candidates {
-		var doc map[string]interface{}
-		if err := yaml.Unmarshal(data, &doc); err != nil || doc == nil {
+		doc, err := decodeSubscriptionYAML(data)
+		if err != nil || doc == nil {
 			continue
 		}
 		value, exists := doc["proxies"]
