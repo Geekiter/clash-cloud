@@ -27,6 +27,54 @@ func (a *App) ensureManagedGroups() error {
 		return err
 	}
 	defer tx.Rollback()
+	// Migrate the former YouTube-US preset into Google-US. Keep its selected
+	// nodes and rules so existing users do not lose their YouTube routing.
+	var googleJSON, youtubeJSON []byte
+	googleErr := tx.QueryRow(`SELECT config_json FROM managed_groups WHERE id='google-us'`).Scan(&googleJSON)
+	youtubeErr := tx.QueryRow(`SELECT config_json FROM managed_groups WHERE id='youtube-us'`).Scan(&youtubeJSON)
+	if youtubeErr == nil {
+		var youtube ManagedGroup
+		if err := json.Unmarshal(youtubeJSON, &youtube); err != nil {
+			return err
+		}
+		var google ManagedGroup
+		if googleErr == nil {
+			if err := json.Unmarshal(googleJSON, &google); err != nil {
+				return err
+			}
+		} else if googleErr == sql.ErrNoRows {
+			google = defaults[2]
+		} else {
+			return googleErr
+		}
+		for _, rule := range youtube.Rules {
+			found := false
+			for _, existing := range google.Rules {
+				if existing.Type == rule.Type && strings.EqualFold(existing.Value, rule.Value) {
+					found = true
+					break
+				}
+			}
+			if !found {
+				google.Rules = append(google.Rules, rule)
+			}
+		}
+		if google.NodeMode == "selected" && youtube.NodeMode == "selected" {
+			for _, id := range youtube.NodeIDs {
+				google.NodeIDs = appendUnique(google.NodeIDs, id)
+			}
+		}
+		encoded, err := json.Marshal(google)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO managed_groups(id,position,config_json) VALUES('google-us',2,?) ON CONFLICT(id) DO UPDATE SET config_json=excluded.config_json`, encoded); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`DELETE FROM managed_groups WHERE id='youtube-us'`); err != nil {
+			return err
+		}
+	}
 	for position, group := range defaults {
 		encoded, err := json.Marshal(group)
 		if err != nil {

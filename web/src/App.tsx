@@ -33,9 +33,9 @@ type OutputState = { status: string; nodeCount: number; generatedAt?: string | n
 type Page = 'subscriptions' | 'nodes' | 'output' | 'groups'
 type Notice = { message: string; severity: 'success' | 'error' | 'info' }
 const API = '/api/v1'
-const serviceGroupIds = new Set(['chatgpt', 'claude', 'google-us', 'youtube-us', 'github', 'reddit'])
+const serviceGroupIds = new Set(['chatgpt', 'claude', 'google-us', 'github', 'reddit'])
 const regionGroupIds = new Set(['europe-us', 'asia'])
-const manualMembershipGroupIds = new Set(['google-us', 'youtube-us', 'europe-us', 'asia'])
+const manualMembershipGroupIds = new Set(['google-us', 'europe-us', 'asia'])
 
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API}${path}`, { ...init, headers: { ...(init?.body ? { 'Content-Type': 'application/json' } : {}), ...init?.headers } })

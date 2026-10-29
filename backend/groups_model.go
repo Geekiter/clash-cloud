@@ -49,8 +49,7 @@ func defaultManagedGroups() []ManagedGroup {
 	return []ManagedGroup{
 		service("chatgpt", "ChatGPT", "openai", "https://chatgpt.com/", "200-399"),
 		service("claude", "Claude", "anthropic", "https://claude.ai/", "200-399"),
-		selected("google-us", "Google-US", "https://www.google.com/generate_204", "204", []GroupRule{{Type: "geosite", Value: "google"}}),
-		selected("youtube-us", "YouTube-US", "https://www.youtube.com/", "200-399", []GroupRule{{Type: "geosite", Value: "youtube"}}),
+		selected("google-us", "Google-US", "https://www.google.com/generate_204", "204", []GroupRule{{Type: "geosite", Value: "google"}, {Type: "geosite", Value: "youtube"}}),
 		service("github", "GitHub", "github", "https://github.com/", "200-399"),
 		service("reddit", "Reddit", "reddit", "https://www.reddit.com/", "200-399"),
 		{
