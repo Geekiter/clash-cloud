@@ -1488,21 +1488,18 @@ func nodesFromProxyMaps(proxies []map[string]interface{}, sourceID, sourceName s
 		if !ok || strings.TrimSpace(typ) == "" || len(typ) > 40 {
 			return nil, parseFailure("invalid_subscription")
 		}
-		originalName := strings.TrimSpace(name)
-		base := strings.TrimSpace(sourceName) + " / " + originalName
-		seen[originalName]++
+		base := strings.TrimSpace(sourceName) + " / " + strings.TrimSpace(name)
+		seen[base]++
 		mergedName := base
-		if seen[originalName] > 1 {
-			mergedName = fmt.Sprintf("%s (%d)", base, seen[originalName])
+		if seen[base] > 1 {
+			mergedName = fmt.Sprintf("%s (%d)", base, seen[base])
 		}
+		raw["name"] = mergedName
 		buf, err := json.Marshal(raw)
 		if err != nil {
 			return nil, parseFailure("invalid_subscription")
 		}
-		fingerprint := append([]byte(sourceID+"\x00"), buf...)
-		fingerprint = append(fingerprint, []byte(fmt.Sprintf("\x00%d", seen[originalName]))...)
-		sum := sha256.Sum256(fingerprint)
-		raw["name"] = mergedName
+		sum := sha256.Sum256(append([]byte(sourceID+"\x00"), buf...))
 		out = append(out, Node{ID: hex.EncodeToString(sum[:12]), Name: mergedName, Type: typ, SourceID: sourceID, SourceName: sourceName, Enabled: true, Raw: raw})
 	}
 	return out, nil

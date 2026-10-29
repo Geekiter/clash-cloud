@@ -17,7 +17,7 @@ Statuses: `pending`, `healthy`, `degraded`, `failed`, `disabled`. The current im
 ## Merged nodes and output
 
 - `GET /nodes?q=&subscriptionId=&limit=&offset=` → `{items:[{id,name,type,sourceId,sourceName,enabled}],total}`.
-- `PATCH /nodes/{id}` body `{enabled:boolean}` → `{id,enabled}`; node-level state persists across subscription refreshes and renamed sources. Disabled nodes are omitted from every unified output link.
+- `PATCH /nodes/{id}` body `{enabled:boolean}` → `{id,enabled}`; node-level state persists across subscription refreshes. Disabled nodes are omitted from every unified output link.
 - `GET /health` → `{status,version}` without secrets.
 
 - `GET /output` → `{status,nodeCount,generatedAt,revision,url,links}`. Each `links` item is `{id,name,url,enabled,createdAt}`; `url` remains the default link URL for compatibility. Link URLs are bearer credentials and are returned only through the authenticated management ingress.
