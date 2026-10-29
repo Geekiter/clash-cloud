@@ -24,6 +24,7 @@ Replace the opaque subscription-management binary in the current Mihomo edge set
 1. MVP implementation on `ac`: subscription CRUD/refresh, valid-snapshot fallback, merged output, admin UI, developer build/run docs.
 2. Mihomo integration and `tx` rollout: test against the edge core, preserve routing/UI compatibility, shadow deploy, verify output, prepare rollback, then schedule cutover.
 3. URI subscriptions: convert supported proxy URI feeds into Mihomo nodes and display sanitized format errors.
+4. Multiple unified output links: create named links with independent tokens, enable or disable each link, and preserve the existing default URL.
 
 ## Stage records
 

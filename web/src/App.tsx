@@ -25,7 +25,8 @@ import LogoutRounded from '@mui/icons-material/LogoutRounded'
 type SubStatus = 'pending' | 'healthy' | 'degraded' | 'failed' | 'disabled' | string
 type Subscription = { id: string; name: string; enabled: boolean; refreshIntervalSeconds: number; nodeCount: number; lastAttemptAt?: string | null; lastSuccessAt?: string | null; status: SubStatus; errorCode?: string | null }
 type NodeItem = { id: string; name: string; type: string; sourceId: string; sourceName: string; latencyMs?: number | null; available?: boolean | null; selected?: boolean }
-type OutputState = { status: string; nodeCount: number; generatedAt?: string | null; revision?: number; url: string; selectedGroup?: string }
+type OutputLink = { id: string; name: string; url: string; enabled: boolean; createdAt: string }
+type OutputState = { status: string; nodeCount: number; generatedAt?: string | null; revision?: number; url?: string; links?: OutputLink[]; selectedGroup?: string }
 type Page = 'subscriptions' | 'nodes' | 'output'
 type Notice = { message: string; severity: 'success' | 'error' | 'info' }
 const API = '/api/v1'
@@ -63,7 +64,8 @@ export default function App() {
   const [activeSub, setActiveSub] = useState<Subscription | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [notice, setNotice] = useState<Notice | null>(null)
-  const [visibleUrl, setVisibleUrl] = useState(false)
+  const [linkDialog, setLinkDialog] = useState<'create' | 'rename' | null>(null)
+  const [activeLink, setActiveLink] = useState<OutputLink | null>(null)
   const [testBusy, setTestBusy] = useState<string | null>(null)
   const [authReady, setAuthReady] = useState(false)
   const [authError, setAuthError] = useState('')
@@ -135,12 +137,23 @@ export default function App() {
     finally { setTestBusy(null) }
   }
   const selectNode = (node: NodeItem) => run(`select:${node.id}`, () => api(`/proxy-groups/PROXY/selection`, { method: 'POST', body: JSON.stringify({ name: node.name }) }), '节点已切换', async () => { await load('nodes') })
-  const copyUrl = async () => {
-    if (!output?.url) return
-    try { await navigator.clipboard.writeText(output.url); setNotice({ message: '链接已复制', severity: 'success' }) }
+  const copyOutputLink = async (link: OutputLink) => {
+    try { await navigator.clipboard.writeText(link.url); setNotice({ message: '链接已复制', severity: 'success' }) }
     catch { setNotice({ message: '复制失败', severity: 'error' }) }
   }
-  const rotateUrl = () => run('rotate', () => api<{ url: string }>('/output/rotate-token', { method: 'POST' }).then(data => { setOutput(current => current ? { ...current, url: data.url } : current) }), '链接已轮换', async () => { await load('output') })
+  const saveOutputLink = (link: OutputLink) => setOutput(current => current ? { ...current, links: (current.links || []).some(item => item.id === link.id) ? current.links!.map(item => item.id === link.id ? link : item) : [...(current.links || []), link] } : current)
+  const createOutputLink = (name: string) => run('link-create', async () => {
+    const result = await api<{ link: OutputLink }>('/output/links', { method: 'POST', body: JSON.stringify({ name }) })
+    saveOutputLink(result.link)
+  }, '链接已创建', () => { setLinkDialog(null) })
+  const renameOutputLink = (name: string) => activeLink && run('link-rename', async () => {
+    const result = await api<{ link: OutputLink }>(`/output/links/${encodeURIComponent(activeLink.id)}`, { method: 'PATCH', body: JSON.stringify({ name }) })
+    saveOutputLink(result.link)
+  }, '名称已更新', () => { setLinkDialog(null); setActiveLink(null) })
+  const toggleOutputLink = (link: OutputLink) => run(`link-toggle:${link.id}`, async () => {
+    const result = await api<{ link: OutputLink }>(`/output/links/${encodeURIComponent(link.id)}`, { method: 'PATCH', body: JSON.stringify({ enabled: !link.enabled }) })
+    saveOutputLink(result.link)
+  }, link.enabled ? '链接已暂停' : '链接已启用')
 
   const nav = <Stack spacing={0.5} sx={{ p: 2, pt: mobile ? 0 : 2 }}>
     {[['subscriptions', '订阅', <AutorenewRounded key="s"/>], ['nodes', '节点', <HubOutlined key="n"/>], ['output', '统一出口', <LinkRounded key="o"/>]] .map(([key, title, icon]) => <Button key={key as string} startIcon={icon} onClick={() => setPage(key as Page)} className={`nav-item ${page === key ? 'selected' : ''}`} fullWidth>{title}</Button>)}
@@ -178,7 +191,7 @@ export default function App() {
               </TableBody>
             </Table></TableContainer>
           </Paper>
-          <OutputStrip output={output} onLoad={() => void load('output')} onCopy={() => void copyUrl()} onRotate={() => void rotateUrl()} busy={busy === 'rotate'} />
+          <OutputStrip output={output} onLoad={() => void load('output')} onManage={() => setPage('output')} />
         </>}
 
         {page === 'nodes' && <>
@@ -194,10 +207,11 @@ export default function App() {
           </TableBody></Table></TableContainer></Paper>
         </>}
 
-        {page === 'output' && <OutputPanel output={output} visible={visibleUrl} onToggleVisible={() => setVisibleUrl(v => !v)} onCopy={() => void copyUrl()} onRotate={() => void rotateUrl()} busy={busy === 'rotate'} loading={loading} onRefresh={() => void load('output')}/>}
+        {page === 'output' && <OutputPanel output={output} loading={loading} onRefresh={() => void load('output')} onCreate={() => { setActiveLink(null); setLinkDialog('create') }} onCopy={link => void copyOutputLink(link)} onRename={link => { setActiveLink(link); setLinkDialog('rename') }} onToggle={link => void toggleOutputLink(link)} busy={busy}/>}
       </Box>
     </Box>
     <SubscriptionDialog open={dialog === 'create' || dialog === 'edit'} mode={dialog === 'edit' ? 'edit' : 'create'} sub={activeSub} busy={busy === 'save'} onClose={() => setDialog(null)} onSave={dialog === 'edit' ? editSub : createSub}/>
+    <OutputLinkDialog open={!!linkDialog} mode={linkDialog === 'rename' ? 'rename' : 'create'} initialName={activeLink?.name || ''} busy={busy === 'link-create' || busy === 'link-rename'} onClose={() => { setLinkDialog(null); setActiveLink(null) }} onSave={linkDialog === 'rename' ? renameOutputLink : createOutputLink}/>
     <Dialog open={dialog === 'delete'} onClose={() => setDialog(null)} maxWidth="xs" fullWidth><DialogTitle>删除订阅</DialogTitle><DialogContent><Typography>确定删除「{activeSub?.name}」？</Typography></DialogContent><DialogActions><Button onClick={() => setDialog(null)}>取消</Button><Button color="error" variant="contained" disabled={busy === 'delete'} onClick={() => void deleteSub()}>{busy === 'delete' ? '删除中…' : '删除'}</Button></DialogActions></Dialog>
     <Snackbar open={!!notice} autoHideDuration={3500} onClose={() => setNotice(null)} anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}><Alert severity={notice?.severity || 'info'} variant="filled" onClose={() => setNotice(null)}>{notice?.message}</Alert></Snackbar>
   </Box>
@@ -229,15 +243,35 @@ function SubscriptionDialog({ open, mode, sub, busy, onClose, onSave }: { open: 
   </DialogContent><DialogActions><Button onClick={onClose}>取消</Button><Button variant="contained" disabled={busy} onClick={submit}>{busy ? '保存中…' : mode === 'create' ? '添加订阅' : '保存'}</Button></DialogActions></Dialog>
 }
 
-function OutputStrip({ output, onLoad, onCopy, onRotate, busy }: { output: OutputState | null; onLoad: () => void; onCopy: () => void; onRotate: () => void; busy: boolean }) {
+function maskOutputUrl(url: string) { return url.replace(/(\/s\/)[^/?#]+/, '$1••••••••••') }
+function OutputStrip({ output, onLoad, onManage }: { output: OutputState | null; onLoad: () => void; onManage: () => void }) {
   useEffect(() => { if (!output) onLoad() }, [output, onLoad])
-  return <Box className="output-strip"><Stack direction="row" alignItems="center" spacing={1} className="output-label"><Status status={output?.status === 'healthy' ? 'healthy' : output?.nodeCount ? 'pending' : 'failed'}/><Typography fontWeight={650}>统一出口</Typography></Stack><Box className="url-preview">{output?.url ? output.url.replace(/(\/s\/).+$/, '$1••••••••••••') : '无可用节点'}</Box><Stack direction="row" spacing={0.5}><Tooltip title="复制链接"><IconButton size="small" onClick={onCopy} disabled={!output?.url}><ContentCopyRounded fontSize="small"/></IconButton></Tooltip><Tooltip title="轮换链接"><span><IconButton size="small" onClick={onRotate} disabled={!output?.url || busy}>{busy ? <CircularProgress size={18}/> : <AutorenewRounded fontSize="small"/>}</IconButton></span></Tooltip></Stack></Box>
+  const count = output?.links?.filter(link => link.enabled).length ?? 0
+  return <Box className="output-strip"><Stack direction="row" alignItems="center" spacing={1} className="output-label"><Status status={output?.status === 'healthy' ? 'healthy' : output?.nodeCount ? 'pending' : 'failed'}/><Typography fontWeight={650}>统一出口</Typography></Stack><Box className="url-preview">{count} 个可用链接</Box><Button size="small" onClick={onManage}>管理链接</Button></Box>
 }
-function OutputPanel({ output, visible, onToggleVisible, onCopy, onRotate, busy, loading, onRefresh }: { output: OutputState | null; visible: boolean; onToggleVisible: () => void; onCopy: () => void; onRotate: () => void; busy: boolean; loading: boolean; onRefresh: () => void }) {
-  return <Paper variant="outlined" className="output-panel"><Stack direction="row" alignItems="center" justifyContent="space-between"><Box><Typography variant="h6" fontWeight={700}>订阅链接</Typography><Box sx={{ mt: 1 }}><Status status={output?.status === 'healthy' ? 'healthy' : output?.nodeCount ? 'pending' : 'failed'}/></Box></Box><Button onClick={onRefresh} startIcon={<AutorenewRounded/>}>刷新</Button></Stack>
-    <TextField fullWidth value={loading ? '加载中…' : (visible ? output?.url || '' : output?.url?.replace(/(\/s\/).+$/, '$1••••••••••••') || '')} label="统一配置 URL" InputProps={{ readOnly: true, endAdornment: <InputAdornment position="end"><Tooltip title={visible ? '隐藏链接' : '显示链接'}><IconButton onClick={onToggleVisible} aria-label={visible ? '隐藏链接' : '显示链接'}>{visible ? <VisibilityOffRounded/> : <VisibilityRounded/>}</IconButton></Tooltip></InputAdornment> }} />
-    <Stack direction="row" spacing={1}><Button variant="contained" startIcon={<ContentCopyRounded/>} disabled={!output?.url} onClick={onCopy}>复制链接</Button><Button variant="outlined" startIcon={<AutorenewRounded/>} disabled={!output?.url || busy} onClick={onRotate}>{busy ? '轮换中…' : '轮换链接'}</Button></Stack>
-    <Divider/><Box className="output-meta"><Meta label="节点数" value={String(output?.nodeCount ?? 0)}/><Meta label="配置版本" value={output?.revision ? `#${output.revision}` : '—'}/><Meta label="生成时间" value={fmtDate(output?.generatedAt)}/><Meta label="代理组" value="PROXY"/></Box>
-  </Paper>
+function OutputPanel({ output, loading, onRefresh, onCreate, onCopy, onRename, onToggle, busy }: { output: OutputState | null; loading: boolean; onRefresh: () => void; onCreate: () => void; onCopy: (link: OutputLink) => void; onRename: (link: OutputLink) => void; onToggle: (link: OutputLink) => void; busy: string | null }) {
+  const links = output?.links || []
+  return <Stack spacing={2}>
+    <Paper variant="outlined" className="output-panel"><Stack direction="row" alignItems="center" justifyContent="space-between"><Box><Typography variant="h6" fontWeight={700}>统一出口</Typography><Box sx={{ mt: 1 }}><Status status={output?.status === 'healthy' ? 'healthy' : output?.nodeCount ? 'pending' : 'failed'}/></Box></Box><Stack direction="row" spacing={1}><Button onClick={onRefresh} startIcon={<AutorenewRounded/>}>刷新</Button><Button variant="contained" startIcon={<AddRounded/>} onClick={onCreate}>新建链接</Button></Stack></Stack>
+      <Box className="output-meta"><Meta label="节点数" value={String(output?.nodeCount ?? 0)}/><Meta label="配置版本" value={output?.revision ? `#${output.revision}` : '—'}/><Meta label="生成时间" value={fmtDate(output?.generatedAt)}/><Meta label="代理组" value={output?.selectedGroup || 'PROXY'}/></Box>
+    </Paper>
+    <Paper variant="outlined" className="table-paper"><TableContainer><Table aria-label="统一出口链接"><TableHead><TableRow><TableCell>名称</TableCell><TableCell>订阅地址</TableCell><TableCell>创建时间</TableCell><TableCell>状态</TableCell><TableCell align="right">操作</TableCell></TableRow></TableHead><TableBody>
+      {loading && !links.length ? <TableRow><TableCell colSpan={5}><LoadingRows/></TableCell></TableRow> : links.map(link => <TableRow key={link.id} hover>
+        <TableCell><Typography fontWeight={650}>{link.name}</Typography></TableCell><TableCell className="url-preview">{maskOutputUrl(link.url)}</TableCell><TableCell className="date-cell">{fmtDate(link.createdAt)}</TableCell><TableCell><Stack direction="row" alignItems="center" spacing={1}><Switch size="small" checked={link.enabled} disabled={busy === `link-toggle:${link.id}`} onChange={() => onToggle(link)} inputProps={{ 'aria-label': `${link.enabled ? '暂停' : '启用'} ${link.name}` }}/><Typography>{link.enabled ? '启用' : '已暂停'}</Typography></Stack></TableCell><TableCell align="right"><Stack direction="row" spacing={0.5} justifyContent="flex-end"><Tooltip title="复制链接"><IconButton size="small" aria-label={`复制 ${link.name}`} onClick={() => onCopy(link)}><ContentCopyRounded fontSize="small"/></IconButton></Tooltip><Tooltip title="重命名"><IconButton size="small" aria-label={`重命名 ${link.name}`} onClick={() => onRename(link)}><EditOutlined fontSize="small"/></IconButton></Tooltip></Stack></TableCell>
+      </TableRow>)}
+      {!loading && !links.length && <TableRow><TableCell colSpan={5}><Empty title="还没有订阅链接" action={<Button variant="contained" startIcon={<AddRounded/>} onClick={onCreate}>新建链接</Button>}/></TableCell></TableRow>}
+    </TableBody></Table></TableContainer></Paper>
+  </Stack>
+}
+function OutputLinkDialog({ open, mode, initialName, busy, onClose, onSave }: { open: boolean; mode: 'create' | 'rename'; initialName: string; busy: boolean; onClose: () => void; onSave: (name: string) => void }) {
+  const [name, setName] = useState(initialName)
+  const [error, setError] = useState('')
+  useEffect(() => { if (open) { setName(initialName); setError('') } }, [open, initialName])
+  const submit = () => {
+    if (!name.trim()) { setError('请填写名称'); return }
+    if (name.trim().length > 80) { setError('名称最长 80 个字符'); return }
+    onSave(name.trim())
+  }
+  return <Dialog open={open} onClose={onClose} maxWidth="xs" fullWidth><DialogTitle>{mode === 'create' ? '新建订阅链接' : '重命名链接'}</DialogTitle><DialogContent className="form-content"><TextField autoFocus fullWidth label="链接名称" value={name} inputProps={{ maxLength: 80 }} error={!!error} helperText={error || undefined} onChange={event => { setName(event.target.value); setError('') }}/></DialogContent><DialogActions><Button onClick={onClose}>取消</Button><Button variant="contained" disabled={busy} onClick={submit}>{busy ? '保存中…' : mode === 'create' ? '创建' : '保存'}</Button></DialogActions></Dialog>
 }
 function Meta({ label, value }: { label: string; value: string }) { return <Box><Typography className="meta-label">{label}</Typography><Typography fontWeight={650}>{value}</Typography></Box> }

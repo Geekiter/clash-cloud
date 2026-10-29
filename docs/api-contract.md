@@ -19,10 +19,13 @@ Statuses: `pending`, `healthy`, `degraded`, `failed`, `disabled`. The current im
 - `GET /nodes?q=&subscriptionId=&limit=&offset=` → `{items:[{id,name,type,sourceId,sourceName,latencyMs?,available?,selected?}],total}`.
 - `POST /nodes/{id}/delay-test` body `{url,timeoutMs?}` → `{delayMs}` or a safe error code.
 - `POST /proxy-groups/{groupName}/selection` body `{name}` → `204`; escape names as URL path segments.
-- `GET /output` → `{status,nodeCount,generatedAt,revision,url,selectedGroup}`. `status` is `pending`, `healthy`, or `no_nodes`; with no enabled nodes, the generated output is DIRECT-only. The admin UI may mask the full URL visually; the output credential is not an admin API token.
-- `POST /output/rotate-token` → `{url,rotatedAt}`; the previous token stops working.
-- `GET /s/{token}` → `application/yaml` unified config, or a clear non-200 error if no valid output exists.
 - `GET /health` → `{status,version}` without secrets.
+
+- `GET /output` → `{status,nodeCount,generatedAt,revision,url,links,selectedGroup}`. Each `links` item is `{id,name,url,enabled,createdAt}`; `url` remains the default link URL for compatibility. Link URLs are bearer credentials and are returned only through the authenticated management ingress.
+- `POST /output/links` body `{name}` → `201 {link}`; creates an enabled link with its own token to the shared output.
+- `PATCH /output/links/{id}` body `{name?,enabled?}` → `{link}`; names are trimmed, 1–80 Unicode characters, and case-insensitively unique. Disabled links return 404 from their public URL.
+- `POST /output/rotate-token` → `{url,rotatedAt}`; retained for compatibility and rotates the default link token.
+- `GET /s/{token}` → `application/yaml` unified config, or 404 for an unknown/disabled link and a clear non-200 error if no valid output exists.
 
 ## Errors
 

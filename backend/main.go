@@ -27,6 +27,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	_ "github.com/mattn/go-sqlite3"
 	"gopkg.in/yaml.v3"
@@ -195,6 +197,8 @@ func migrate(db *sql.DB) error {
 	FOREIGN KEY(subscription_id) REFERENCES subscriptions(id) ON DELETE CASCADE);
 	CREATE TABLE IF NOT EXISTS output_settings(id INTEGER PRIMARY KEY CHECK(id=1),token_hash TEXT NOT NULL,encrypted_token BLOB NOT NULL,
 	public_url TEXT NOT NULL DEFAULT '',config BLOB NOT NULL DEFAULT '',generated_at TEXT,revision INTEGER NOT NULL DEFAULT 0);
+	CREATE TABLE IF NOT EXISTS output_links(id TEXT PRIMARY KEY,name TEXT NOT NULL,name_key TEXT NOT NULL UNIQUE,token_hash TEXT NOT NULL UNIQUE,
+	encrypted_token BLOB NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL);
 	CREATE TABLE IF NOT EXISTS proxy_selection(group_name TEXT PRIMARY KEY,node_name TEXT NOT NULL);`)
 	return err
 }
@@ -307,19 +311,31 @@ func (a *App) ensureOutputToken(publicURL string) error {
 	if count > 0 {
 		if publicURL != "" {
 			_, err = a.db.Exec(`UPDATE output_settings SET public_url=? WHERE id=1`, publicURL)
+			if err != nil {
+				return err
+			}
 		}
+	} else {
+		t, e := randomToken()
+		if e != nil {
+			return e
+		}
+		encrypted, e := a.encrypt([]byte(t))
+		if e != nil {
+			return e
+		}
+		if _, e = a.db.Exec(`INSERT INTO output_settings(id,token_hash,encrypted_token,public_url,config,revision) VALUES(1,?,?,?,?,0)`, hash(t), encrypted, publicURL, []byte{}); e != nil {
+			return e
+		}
+	}
+	// Seed after the singleton exists so upgrades keep the existing /s/{token} valid.
+	var tokenHash string
+	var encrypted []byte
+	if err := a.db.QueryRow(`SELECT token_hash,encrypted_token FROM output_settings WHERE id=1`).Scan(&tokenHash, &encrypted); err != nil {
 		return err
 	}
-	t, e := randomToken()
-	if e != nil {
-		return e
-	}
-	encrypted, e := a.encrypt([]byte(t))
-	if e != nil {
-		return e
-	}
-	_, e = a.db.Exec(`INSERT INTO output_settings(id,token_hash,encrypted_token,public_url,config,revision) VALUES(1,?,?,?,?,0)`, hash(t), encrypted, publicURL, []byte{})
-	return e
+	_, err = a.db.Exec(`INSERT OR IGNORE INTO output_links(id,name,name_key,token_hash,encrypted_token,enabled,created_at) VALUES('default','Default','default',?,?,1,?)`, tokenHash, encrypted, stamp(time.Now().UTC()))
+	return err
 }
 func (a *App) api(w http.ResponseWriter, r *http.Request) { // Routes are protected by the trusted ingress; bind to loopback by default.
 	p := strings.TrimPrefix(r.URL.Path, "/api/v1")
@@ -350,6 +366,22 @@ func (a *App) api(w http.ResponseWriter, r *http.Request) { // Routes are protec
 	}
 	if p == "/output" && r.Method == http.MethodGet {
 		a.outputInfo(w)
+		return
+	}
+	if p == "/output/links" {
+		if r.Method == http.MethodPost {
+			a.createOutputLink(w, r)
+		} else {
+			method(w)
+		}
+		return
+	}
+	if strings.HasPrefix(p, "/output/links/") {
+		if r.Method == http.MethodPatch {
+			a.patchOutputLink(w, r, strings.TrimPrefix(p, "/output/links/"))
+		} else {
+			method(w)
+		}
 		return
 	}
 	if p == "/output/rotate-token" && r.Method == http.MethodPost {
@@ -844,23 +876,62 @@ func (a *App) listNodes(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonResponse(w, 200, map[string]interface{}{"items": filtered[offset:end], "total": total})
 }
+
+type outputLink struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	URL       string `json:"url"`
+	Enabled   bool   `json:"enabled"`
+	CreatedAt string `json:"createdAt"`
+}
+
+func (a *App) linkURL(public, token string) string {
+	if public == "" {
+		return "/s/" + token
+	}
+	return public + "/s/" + token
+}
+
+func (a *App) getOutputLinks(public string) ([]outputLink, error) {
+	rows, err := a.db.Query(`SELECT id,name,encrypted_token,enabled,created_at FROM output_links ORDER BY created_at,id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	links := []outputLink{}
+	for rows.Next() {
+		var link outputLink
+		var encrypted []byte
+		var enabled int
+		if err := rows.Scan(&link.ID, &link.Name, &encrypted, &enabled, &link.CreatedAt); err != nil {
+			return nil, err
+		}
+		token, err := a.decrypt(encrypted)
+		if err != nil {
+			return nil, err
+		}
+		link.URL = a.linkURL(public, string(token))
+		link.Enabled = enabled != 0
+		links = append(links, link)
+	}
+	return links, rows.Err()
+}
+
 func (a *App) outputInfo(w http.ResponseWriter) {
-	var encryptedToken []byte
 	var public string
 	var rev int
 	var generated sql.NullString
 	var config []byte
-	e := a.db.QueryRow(`SELECT encrypted_token,public_url,revision,generated_at,config FROM output_settings WHERE id=1`).Scan(&encryptedToken, &public, &rev, &generated, &config)
+	e := a.db.QueryRow(`SELECT public_url,revision,generated_at,config FROM output_settings WHERE id=1`).Scan(&public, &rev, &generated, &config)
 	if e != nil {
 		internal(w)
 		return
 	}
-	tokenBytes, e := a.decrypt(encryptedToken)
+	links, e := a.getOutputLinks(public)
 	if e != nil {
 		internal(w)
 		return
 	}
-	token := string(tokenBytes)
 	nodes, nodeErr := a.allNodes(true)
 	if nodeErr != nil {
 		internal(w)
@@ -872,16 +943,149 @@ func (a *App) outputInfo(w http.ResponseWriter) {
 	} else if len(config) == 0 {
 		status = "pending"
 	}
-	u := public + "/s/" + token
-	if public == "" {
-		u = "/s/" + token
-	}
 	var gt interface{} = nil
 	if generated.Valid {
 		gt = parseTime(generated)
 	}
-	jsonResponse(w, 200, map[string]interface{}{"status": status, "nodeCount": len(nodes), "generatedAt": gt, "revision": rev, "url": u, "selectedGroup": "PROXY"})
+	legacyURL := ""
+	for _, link := range links {
+		if link.ID == "default" {
+			legacyURL = link.URL
+			break
+		}
+	}
+	jsonResponse(w, 200, map[string]interface{}{"status": status, "nodeCount": len(nodes), "generatedAt": gt, "revision": rev, "url": legacyURL, "links": links, "selectedGroup": "PROXY"})
 }
+
+func validOutputLinkName(name string) (string, string, bool) {
+	name = strings.TrimSpace(name)
+	if name == "" || utf8.RuneCountInString(name) > 80 || strings.IndexFunc(name, unicode.IsControl) >= 0 {
+		return "", "", false
+	}
+	return name, strings.ToLower(name), true
+}
+
+func (a *App) createOutputLink(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Name string `json:"name"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	name, key, ok := validOutputLinkName(in.Name)
+	if !ok {
+		apiError(w, 400, "invalid_name", "Name must be 1 to 80 characters")
+		return
+	}
+	var exists int
+	if err := a.db.QueryRow(`SELECT count(*) FROM output_links WHERE name_key=?`, key).Scan(&exists); err != nil {
+		internal(w)
+		return
+	}
+	if exists > 0 {
+		apiError(w, 409, "duplicate_name", "A link with this name already exists")
+		return
+	}
+	id, err := newID()
+	if err != nil {
+		internal(w)
+		return
+	}
+	token, err := randomToken()
+	if err != nil {
+		internal(w)
+		return
+	}
+	encrypted, err := a.encrypt([]byte(token))
+	if err != nil {
+		internal(w)
+		return
+	}
+	createdAt := stamp(time.Now().UTC())
+	_, err = a.db.Exec(`INSERT INTO output_links(id,name,name_key,token_hash,encrypted_token,enabled,created_at) VALUES(?,?,?,?,?,1,?)`, id, name, key, hash(token), encrypted, createdAt)
+	if err != nil {
+		var duplicate int
+		if checkErr := a.db.QueryRow(`SELECT count(*) FROM output_links WHERE name_key=?`, key).Scan(&duplicate); checkErr != nil {
+			internal(w)
+		} else if duplicate > 0 {
+			apiError(w, 409, "duplicate_name", "A link with this name already exists")
+		} else {
+			internal(w)
+		}
+		return
+	}
+	var public string
+	if err := a.db.QueryRow(`SELECT public_url FROM output_settings WHERE id=1`).Scan(&public); err != nil {
+		internal(w)
+		return
+	}
+	jsonResponse(w, 201, map[string]interface{}{"link": outputLink{ID: id, Name: name, URL: a.linkURL(public, token), Enabled: true, CreatedAt: createdAt}})
+}
+
+func (a *App) patchOutputLink(w http.ResponseWriter, r *http.Request, id string) {
+	if id == "" || strings.Contains(id, "/") {
+		apiError(w, 404, "not_found", "Output link not found")
+		return
+	}
+	var in struct {
+		Name    *string `json:"name"`
+		Enabled *bool   `json:"enabled"`
+	}
+	if !decode(w, r, &in) {
+		return
+	}
+	if in.Name == nil && in.Enabled == nil {
+		apiError(w, 400, "invalid_request", "No changes provided")
+		return
+	}
+	var currentName string
+	var enabled int
+	var createdAt string
+	var encrypted []byte
+	if err := a.db.QueryRow(`SELECT name,enabled,created_at,encrypted_token FROM output_links WHERE id=?`, id).Scan(&currentName, &enabled, &createdAt, &encrypted); err != nil {
+		apiError(w, 404, "not_found", "Output link not found")
+		return
+	}
+	name, key := currentName, strings.ToLower(currentName)
+	if in.Name != nil {
+		var ok bool
+		name, key, ok = validOutputLinkName(*in.Name)
+		if !ok {
+			apiError(w, 400, "invalid_name", "Name must be 1 to 80 characters")
+			return
+		}
+	}
+	if in.Enabled != nil {
+		if *in.Enabled {
+			enabled = 1
+		} else {
+			enabled = 0
+		}
+	}
+	if _, err := a.db.Exec(`UPDATE output_links SET name=?,name_key=?,enabled=? WHERE id=?`, name, key, enabled, id); err != nil {
+		var duplicate int
+		if checkErr := a.db.QueryRow(`SELECT count(*) FROM output_links WHERE name_key=? AND id<>?`, key, id).Scan(&duplicate); checkErr != nil {
+			internal(w)
+		} else if duplicate > 0 {
+			apiError(w, 409, "duplicate_name", "A link with this name already exists")
+		} else {
+			internal(w)
+		}
+		return
+	}
+	token, err := a.decrypt(encrypted)
+	if err != nil {
+		internal(w)
+		return
+	}
+	var public string
+	if err := a.db.QueryRow(`SELECT public_url FROM output_settings WHERE id=1`).Scan(&public); err != nil {
+		internal(w)
+		return
+	}
+	jsonResponse(w, 200, map[string]interface{}{"link": outputLink{ID: id, Name: name, URL: a.linkURL(public, string(token)), Enabled: enabled != 0, CreatedAt: createdAt}})
+}
+
 func (a *App) rotateToken(w http.ResponseWriter) {
 	t, e := randomToken()
 	if e != nil {
@@ -893,18 +1097,42 @@ func (a *App) rotateToken(w http.ResponseWriter) {
 		internal(w)
 		return
 	}
-	_, e = a.db.Exec(`UPDATE output_settings SET token_hash=?,encrypted_token=? WHERE id=1`, hash(t), encrypted)
+	tx, e := a.db.Begin()
 	if e != nil {
+		internal(w)
+		return
+	}
+	var result sql.Result
+	result, e = tx.Exec(`UPDATE output_settings SET token_hash=?,encrypted_token=? WHERE id=1`, hash(t), encrypted)
+	if e == nil {
+		var affected int64
+		affected, e = result.RowsAffected()
+		if e == nil && affected != 1 {
+			e = errors.New("output settings row missing")
+		}
+	}
+	if e == nil {
+		result, e = tx.Exec(`UPDATE output_links SET token_hash=?,encrypted_token=? WHERE id='default'`, hash(t), encrypted)
+	}
+	if e == nil {
+		var affected int64
+		affected, e = result.RowsAffected()
+		if e == nil && affected != 1 {
+			e = errors.New("default output link missing")
+		}
+	}
+	if e != nil {
+		_ = tx.Rollback()
+		internal(w)
+		return
+	}
+	if e = tx.Commit(); e != nil {
 		internal(w)
 		return
 	}
 	var public string
 	_ = a.db.QueryRow(`SELECT public_url FROM output_settings WHERE id=1`).Scan(&public)
-	u := public + "/s/" + t
-	if public == "" {
-		u = "/s/" + t
-	}
-	jsonResponse(w, 200, map[string]interface{}{"url": u, "rotatedAt": stamp(time.Now().UTC())})
+	jsonResponse(w, 200, map[string]interface{}{"url": a.linkURL(public, t), "rotatedAt": stamp(time.Now().UTC())})
 }
 func (a *App) subscription(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
@@ -918,8 +1146,13 @@ func (a *App) subscription(w http.ResponseWriter, r *http.Request) {
 	}
 	var want string
 	var config []byte
-	err := a.db.QueryRow(`SELECT token_hash,config FROM output_settings WHERE id=1`).Scan(&want, &config)
-	if err != nil || !constantEqual(want, hash(token)) {
+	var enabled int
+	err := a.db.QueryRow(`SELECT token_hash,enabled FROM output_links WHERE token_hash=?`, hash(token)).Scan(&want, &enabled)
+	if err != nil || enabled == 0 || !constantEqual(want, hash(token)) {
+		apiError(w, 404, "not_found", "Subscription not found")
+		return
+	}
+	if err := a.db.QueryRow(`SELECT config FROM output_settings WHERE id=1`).Scan(&config); err != nil {
 		apiError(w, 404, "not_found", "Subscription not found")
 		return
 	}

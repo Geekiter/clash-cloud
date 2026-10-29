@@ -1,6 +1,6 @@
 # Clash Cloud backend (MVP)
 
-A single-process Go control plane for subscription CRUD, guarded fetching, last-good snapshots, merged Mihomo YAML output, and the documented `/api/v1` endpoints. It uses SQLite and AES-GCM encryption for source URLs. Build artifacts and runtime state are not stored in this directory.
+A single-process Go control plane for subscription CRUD, guarded fetching, last-good snapshots, merged Mihomo YAML output, and the documented `/api/v1` endpoints. It uses SQLite and AES-GCM encryption for source URLs and output-link tokens. Build artifacts and runtime state are not stored in this directory.
 
 ## Build and run
 
@@ -17,9 +17,9 @@ CLASH_CLOUD_PUBLIC_URL=https://example.invalid \
 ./clash-cloud
 ```
 
-Generate a key with `openssl rand -base64 32` and store it in a root-readable systemd environment file. `CLASH_CLOUD_ENCRYPTION_KEY` accepts base64 or hex encoding of exactly 32 bytes. Back up the database and key together. Losing the key makes stored subscription URLs unreadable. Production deployments set `CLASH_CLOUD_OAUTH_ENABLED=1` through the required `mattermost-oauth.env` systemd drop-in; a missing credentials file prevents the service from starting.
+Generate a key with `openssl rand -base64 32` and store it in a root-readable systemd environment file. `CLASH_CLOUD_ENCRYPTION_KEY` accepts base64 or hex encoding of exactly 32 bytes. Back up the database and key together. Losing the key makes stored subscription URLs and output-link tokens unreadable. Production deployments set `CLASH_CLOUD_OAUTH_ENABLED=1` through the required `mattermost-oauth.env` systemd drop-in; a missing credentials file prevents the service from starting.
 
-The management UI and API use Mattermost OAuth when `CLASH_CLOUD_OAUTH_ENABLED=1`. OAuth uses the authorization-code flow and limits access to Mattermost `system_admin` accounts. The backend stores a signed 12-hour HttpOnly session cookie and does not persist Mattermost access tokens. Keep the client secret and session signing key in a root-only systemd environment file. The public `/s/{token}` endpoint is independent and accepts only its bearer token. Do not log request headers, OAuth callback query strings, or subscription bodies.
+The management UI and API use Mattermost OAuth when `CLASH_CLOUD_OAUTH_ENABLED=1`. OAuth uses the authorization-code flow and limits access to Mattermost `system_admin` accounts. The backend stores a signed 12-hour HttpOnly session cookie and does not persist Mattermost access tokens. Keep the client secret and session signing key in a root-only systemd environment file. The public `/s/{token}` endpoint is independent and accepts only its bearer token. Do not log request headers, OAuth callback query strings, or subscription bodies. Output-link management uses `GET /api/v1/output` (including `links`), `POST /api/v1/output/links` with `{"name":"..."}`, and `PATCH /api/v1/output/links/{id}` with `name` and/or `enabled`. The existing default subscription token is migrated into the `Default` link; the legacy rotate endpoint continues to rotate that link.
 
 ## Configuration
 
